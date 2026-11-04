@@ -8,13 +8,13 @@
 
 The two agent replies that have cost me the most time are "it's fixed," when nothing had run since the last edit, and "that isn't used anywhere," after one search. Both sound final, so I moved on, and didn't find out they were wrong until something broke.
 
-On November 4, 2026, I replayed my own Claude Code history through the hook: 3,977 turns, after dropping 1,649 duplicates (resuming a session copies its earlier turns into a new file). Of those, 405 ended with a claim like "done," "fixed," "deployed" or "tests pass," and the hook would have blocked 85. Most of the 85 weren't the case I built it for.
+On November 4, 2026, I replayed my own Claude Code history through the hook: 3,977 turns, after dropping 1,649 duplicates (resuming a session copies its earlier turns into a new file). Of those, 406 ended with a claim like "done," "fixed," "deployed" or "tests pass," and the hook would have blocked 86. Most of the 86 weren't the case I built it for.
 
-- 76 had no tool calls at all. Usually that's a wrap-up saying something was fixed or deployed, with no commit, test result or status code in it. The proof may be in an earlier turn, but the wrap-up is what I read, and it doesn't show any.
+- 77 had no tool calls at all. Usually that's a wrap-up saying something was fixed or deployed, with no commit, test result or status code in it. The proof may be in an earlier turn, but the wrap-up is what I read, and it doesn't show any.
 - 8 had tool calls, but only reads, searches, read-only commands, to-do updates or failed commands.
 - 1 made the claim after a code edit with nothing run successfully since. That's the case I built the hook for. It's probably rare here because an older version was already catching it on my machine. Your count may be higher.
 
-I hand-checked 23 of the 85: 20 drawn at random when the count was still 82, plus the 3 that a later rule change added. Seventeen were wrap-ups that claimed finished work without citing a commit, test output or status code. Three weren't claims of finished work: a research finding (a change had been tested and made the model worse), a condition (the work would count as done once merged) and a plan for work that hadn't started. The other three could be read either way.
+I hand-checked 24 of the 86: 20 drawn at random when the count was still 82, plus the 4 that later rule changes added. Eighteen were wrap-ups that claimed finished work without citing a commit, test output or status code. Three weren't claims of finished work: a research finding (a change had been tested and made the model worse), a condition (the work would count as done once merged) and a plan for work that hadn't started. The other three could be read either way.
 
 Separately, 17 turns ended by saying something wasn't there, and in 2 of them the agent had looked once or not at all.
 
@@ -43,12 +43,12 @@ show the result, or say plainly that it isn't verified yet.
 - a pass count on a line with no failures: "14 passed" counts, "3 failed, 2 passed" and "0 passed" don't
 - a 2xx status: "HTTP 200", "status 200", "201 Created"
 - "exit code 0" or "CI green"
-- a link to a GitHub Actions run, a commit or a pull request
+- a link to a GitHub Actions run or pull request, or any link to a commit
 - the Chinese equivalents: 12 条测试全通过, 退出码 0, 全绿
 
 **Ignored:** claims in code blocks, inline code, double quotes (straight, curly, 「」 or 『』), blockquotes, questions and Markdown table rows, and a phrase in a slash-separated list like "tests pass/fail".
 
-**Cancelled:** a "done" claim with a negation earlier in its clause ("hasn't been deployed"), or after a condition that opens the clause or the sentence ("once tests pass, tag it"). A condition inside a noun phrase doesn't cancel it: "the crash when saving is fixed" is still a claim. A "not found" claim is cancelled by a condition anywhere before it in the clause, including "make sure" and "in case" ("If the config file doesn't exist, the script creates it").
+**Cancelled:** a "done" claim with a negation earlier in its clause ("hasn't been deployed"), or in a clause or sentence that opens with a condition word: if, once, when, after, before, until, unless, make sure or in case ("once tests pass, tag it"). A condition inside a noun phrase doesn't cancel it: "the crash when saving is fixed" is still a claim. A "not found" claim is cancelled by any of those words except "after", anywhere before it in the clause ("If the config file doesn't exist, the script creates it").
 
 It never blocks twice in a row, so the agent can't get stuck, and if the hook itself crashes, it lets the turn end.
 
@@ -91,7 +91,8 @@ Every block is written to `~/.claude/claim-check/blocks.jsonl` (set `CLAIM_CHECK
 
 ## What it can't do
 
-- It matches phrases, so "I believe this works" gets through.
+- It matches set phrases, so "I believe this works" gets through. So do some common wrap-ups: "The redirect loop is fixed" and "Fixed." are caught, but "Fixed the redirect loop", "Fixed, deployed to prod" and "I'm done" aren't.
+- A sentence that opens with a condition word isn't read as a claim, so "After the restart, everything is deployed" gets through.
 - One honest "not verified" anywhere lets the whole reply through: "The login bug is fixed. I haven't tested signup." passes, and so does an unrelated negative like "Fixed. Do not test on prod."
 - A negation earlier in the same clause cancels a claim, so "The bug that never showed up on staging is fixed" gets through.
 - Any 7-to-40-character string of hex letters and digits counts as a commit hash, so an ID like `a1b2c3d4` passes as proof.

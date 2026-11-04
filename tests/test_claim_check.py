@@ -125,6 +125,12 @@ class Done(unittest.TestCase):
         for text in ('已经修复了。', '测试都通过了。', '部署好了。', '都做完了。'):
             self.assertIsNotNone(C._first(C.DONE, text), text)
 
+    def test_chinese_sentences_split_without_a_space(self):
+        # A 还没 or 如果 in the previous sentence doesn't cancel the claim in the next one.
+        for text in ('注册页还没改。登录的 bug 已经修好了。', '如果你愿意，我明天再看看。登录的 bug 已经修好了。'):
+            self.assertEqual(C._first(C.DONE, text), '已经修好', text)
+        self.assertEqual(C._first(C.ABSENT, '如果需要我再查。没找到调用方。'), '没找到')
+
     def test_docs_only_change_needs_no_run(self):
         self.assertIsNone(C.judge(turn(tool('Edit', file_path='README.md'), say('Done.'))))
 

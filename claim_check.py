@@ -221,7 +221,7 @@ def judge(turn, final_text=None):
         # Proof is looked for in the raw text: a hash in backticks or before a question still counts.
         elif not ran and not has_proof(raw) and not any(n == 'EditDoc' for _, n in actions):
             return 'done', claim, ('nothing ran in this turn and you cited no proof' if not actions else
-                                   'nothing in this turn tested anything (only lookups, to-do updates or failed commands), '
+                                   'nothing you ran in this turn tested anything (only lookups, to-do updates or failed commands), '
                                    'and you cited no proof')
 
     return judge_absent(turn, final_text)
@@ -251,7 +251,8 @@ def _cancelled(patterns, sentence, start):
 
 def _first(patterns, text):
     """First claim in the text, skipping negated and conditional ones (see NEGATION above)."""
-    for sentence in re.split(r'(?<=[.!?。！？])\s+|\n', text):
+    # Chinese sentences often run on with no space after 。, so split there without one.
+    for sentence in re.split(r'(?<=[.!?])\s+|(?<=[。！？])\s*|\n', text):
         for p in patterns:
             for m in re.finditer(p, sentence, re.I):
                 if _cancelled(patterns, sentence, m.start()):
@@ -325,13 +326,13 @@ REASONS = {        # how replay groups the turns it would have blocked
     'nothing ran successfully after the last edit': 'nothing ran successfully after the last code edit',
     'nothing ran in this turn and you cited no proof':
         'no tool calls in the turn and no proof cited (often a summary; the proof may be in an earlier turn)',
-    'nothing in this turn tested anything (only lookups, to-do updates or failed commands), and you cited no proof':
+    'nothing you ran in this turn tested anything (only lookups, to-do updates or failed commands), and you cited no proof':
         'only lookups, to-do updates or failed commands',
 }
 
 
 def _n(n, one, many=None):
-    return f'{n} {one if n == 1 else (many or one + "s")}'
+    return f'{n:,} {one if n == 1 else (many or one + "s")}'
 
 
 def replay(root):

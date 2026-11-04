@@ -13,6 +13,7 @@
 - A condition ("if the config file doesn't exist…", 如果没找到…) now cancels a "not found" claim.
 - A condition cancels a "done" claim only when it opens the clause or the sentence ("once tests pass, tag it"), so "the crash when saving is fixed" is now a claim. Clauses also break at "and", "but", "so" and dashes, so "no errors, and everything is deployed" is a claim too.
 - The messages say what actually happened: "nothing ran successfully after the last edit" when the only run after it failed, and "only lookups, to-do updates or failed commands" when nothing tested anything.
+- Chinese sentences are split at 。！？ even with no space after them, so a 还没 or 如果 in the previous sentence no longer cancels a claim (注册页还没改。登录的 bug 已经修好了。 is now blocked).
 - `report` skips damaged log lines and says '2 "done", 1 "not found"' instead of internal names. `replay` says when the folder it was given doesn't exist. The hook ignores a payload that isn't a JSON object.
 - `replay` counts "not found" claims on their own, even in a turn already blocked for "done". `replay` and `report` get singulars right ("1 turn", "1 copy", "1 has").
 - More tests: every kind of cited proof, look-alikes that aren't proof, and each "not found" phrase.

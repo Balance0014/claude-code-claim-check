@@ -13,6 +13,6 @@
 <text x="22" y="176" fill="#ff7b72" font-weight="600">  to the live URL) and show the result, or say plainly that it isn't verified yet.</text>
 <text x="22" y="198" fill="#8b949e">  ⏺ Bash(npm test -- auth)</text>
 <text x="22" y="220" fill="#7ee787">    ✓ 14 passed (1.2s)</text>
-<text x="22" y="242" fill="#ffffff" font-weight="600">  ⏺ Fixed: the 14 auth tests pass, including the new redirect-loop test.</text>
+<text x="22" y="242" fill="#ffffff" font-weight="600">  ⏺ Fixed: the 14 auth tests pass.</text>
 </g>
 </svg>
