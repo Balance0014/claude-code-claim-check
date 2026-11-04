@@ -25,7 +25,7 @@ A real fix covers five things. Say which ones you did, and which you skipped:
 
 1. **Cause.** You found why it broke, not only where.
 2. **Prevention.** Something now stops the same failure, such as a test, a check or a guard.
-3. **Siblings.** You looked for the same bug in similar places.
+3. **Same bug elsewhere.** You looked for the same bug in similar places.
 4. **Verification.** You ran the real thing and saw it work.
 5. **Cleanup.** No temporary files, debug output or backup copies left behind.
 

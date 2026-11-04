@@ -20,7 +20,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
-      - name: Unit tests (each rule has a case to catch and a case to let through)
+      - name: Unit tests (what each kind of claim must catch and let through)
         run: python -m unittest discover tests -v
       - name: The hook runs the way Claude Code calls it
         run: |

@@ -5,8 +5,9 @@ Claude Code runs this as a Stop hook when the agent tries to end its turn. It re
 session transcript, looks at what the agent claimed in its final message, and checks what
 the agent actually did since your last message:
 
-  * "fixed / deployed / tests pass / done" needs a command that ran after the last file
-    edit and did not fail. Reading the file you just edited is not proof.
+  * "fixed / deployed / tests pass / done" needs something that ran after the last code
+    edit and did not fail: a shell command, an MCP tool, a URL fetch or a subagent. Reading
+    the file you just edited is not proof. A turn with no edits can cite proof instead.
   * "doesn't exist / not found / nothing calls it" needs at least two lookups.
 
 Missing proof: it blocks once, says exactly what is missing, and the agent either runs
@@ -18,7 +19,7 @@ Usage:
   claim_check.py                      Stop hook mode (reads the hook payload on stdin)
   claim_check.py check FILE.jsonl     Judge the last turn of a transcript, print the verdict
   claim_check.py replay [DIR]         Judge every turn in past transcripts (default
-                                      ~/.claude/projects) and print how often claims had proof
+                                      ~/.claude/projects) and print how often claims had none
   claim_check.py report               Summarize the block log
 
 Standard library only. Python 3.9+.
@@ -183,8 +184,8 @@ def parse(turn):
 def judge(turn, final_text=None):
     """Return None if the turn is fine, else (kind, claim, what's missing).
 
-    final_text: the agent's last message as Claude Code hands it to the hook. The transcript
-    is written asynchronously and can miss that message, so it wins when present.
+    final_text: the agent's last message, from the Stop hook's last_assistant_message field.
+    The transcript is written asynchronously and can miss that message, so it wins when present.
     """
     actions, errors, said = parse(turn)
     if final_text:
@@ -201,7 +202,7 @@ def judge(turn, final_text=None):
                 return 'done', claim, 'nothing ran after the last edit'
         elif not ran and not PROOF.search(said) and not any(n == 'EditDoc' for _, n in actions):
             return 'done', claim, ('nothing ran in this turn and you cited no proof'
-                                   if not actions else 'you only read or searched in this turn and cited no proof')
+                                   if not actions else 'nothing you ran in this turn tests anything, and you cited no proof')
 
     claim = _first(ABSENT, said)
     lookups = sum(1 for i, n in actions if i not in errors and (looks(n) or n == 'BashRead'))
@@ -221,7 +222,7 @@ def _first(patterns, text):
                 if check_negation and NOT_A_CLAIM.search(clause):
                     continue
                 if LIST_SEP.search(sentence[max(0, m.start() - 1):m.start()] + sentence[m.end():m.end() + 1]):
-                    continue                            # "chatter/resolved/ads": a list of labels, not a claim
+                    continue                            # "pass/fail/skip": a list of labels, not a claim
                 return re.sub(r'^[\s*✅-]+|(?:\s+and|[\s.!:—-])+$', '', m.group(0))   # "- ✅ Done:" -> "Done"
     return None
 
@@ -230,7 +231,7 @@ def message(kind, claim, missing):
     if kind == 'done':
         how = ('Run the check that proves it (the tests, the script, a request to the live URL) and show the result'
                if 'after the last edit' in missing else
-               'Run the check and show the result, cite proof you already have (a commit, test result or status code)')
+               'Either run the check and show the result, cite proof you already have (a commit, test result or status code)')
         return f'claim-check: you wrote "{claim}", but {missing}. {how}, or say plainly that it isn\'t verified yet.'
     return (f'claim-check: you wrote "{claim}", but {missing}. '
             "Search or read at least twice before saying something isn't there, or say it's a guess.")
@@ -284,8 +285,12 @@ REASONS = {        # how replay groups the turns it would have blocked
     'nothing ran after the last edit': 'nothing ran after the last code edit',
     'nothing ran in this turn and you cited no proof':
         'no tool calls in the turn and no proof cited (often a summary; the proof may be in an earlier turn)',
-    'you only read or searched in this turn and cited no proof': 'only lookups in the turn, nothing that tests anything',
+    'nothing you ran in this turn tests anything, and you cited no proof': 'only lookups in the turn, nothing that tests anything',
 }
+
+
+def _n(n, one, many=None):
+    return f'{n} {one if n == 1 else (many or one + "s")}'
 
 
 def replay(root):
@@ -318,10 +323,11 @@ def replay(root):
                 if v[0] == 'done':
                     r = REASONS.get(v[2], v[2])
                     why[r] = why.get(r, 0) + 1
-    print(f'{len(files)} transcripts, {n_turns} turns' + (f' ({dups} copies from resumed sessions skipped).' if dups else '.'))
+    print(f'{_n(len(files), "transcript")}, {_n(n_turns, "turn")}'
+          + (f' ({_n(dups, "copy", "copies")} from resumed sessions skipped).' if dups else '.'))
     for kind, label in (('done', '"done / fixed / deployed"'), ('absent', '"not found / doesn\'t exist"')):
         c, b = seen[kind]
-        print(f'  {label}: {c} turns end with the claim; {b} had no proof by these rules ({b / c:.0%}).' if c
+        print(f'  {label}: {_n(c, "turn ends", "turns end")} with the claim; {b} had no proof by these rules ({b / c:.0%}).' if c
               else f'  {label}: no such claims.')
         if kind == 'done':
             for r, n in sorted(why.items(), key=lambda x: -x[1]):
@@ -342,7 +348,8 @@ def report():
     for r in rows:
         by[r.get('kind')] = by.get(r.get('kind'), 0) + 1
     print(f'{len(rows)} block{"" if len(rows) == 1 else "s"} since {rows[0]["at"]}: ' + ', '.join(f'{k} {v}' for k, v in sorted(by.items())))
-    print('Latest ten (check these for false positives):')
+    shown = min(10, len(rows))
+    print(('The block' if shown == 1 else f'The latest {shown}') + ' (check for false positives):')
     for r in rows[-10:]:
         print(f'  {r["at"]}  {r["kind"]:6}  "{r["claim"]}"  ({r["missing"]})')
     return 0

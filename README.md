@@ -30,12 +30,16 @@ or say plainly that it isn't verified yet.
 
 | The agent says | It needs, in this turn |
 | --- | --- |
-| "fixed", "deployed", "tests pass", "done", "已修复", "已上线" | Something that ran **after the last code edit** and didn't fail: a shell command, any MCP tool (browser, API), a URL fetch, or a subagent. Commands that only look (`cat`, `grep`, `ls`, `git diff` and the like, even chained with `cd` or `&&` or piped), re-reading a file and updating a to-do list don't count. Editing `.md`, `.rst` or `.adoc` files after the check is fine. |
-| The same, in a turn with no code edits and nothing run | Proof cited in the reply: a commit hash, a test count, a status code, a CI link. A turn that only edits docs passes. |
+| "fixed", "deployed", "tests pass", "done", "已修复", "已上线" | Something that ran **after the last code edit** and didn't fail: a shell command, any MCP tool (browser, API), a URL fetch or a subagent |
+| The same, in a turn with no code edits and nothing run | Proof cited in the reply (see below). A turn that only edits docs passes. |
 | "doesn't exist", "nothing calls it", "没找到" | At least two reads, searches or commands. |
 | "not verified yet", "untested", "还没验证" | Nothing. An honest answer always passes. |
 
-Claims inside code blocks, quotes, questions and Markdown table rows are ignored, and so is a phrase in a slash-separated list like "tests pass/fail". A claim that comes after "not", "if", "once", "when" or "until" in the same clause doesn't count either ("hasn't been deployed", "once tests pass"). It never blocks twice in a row, so the agent can't get stuck, and if the hook itself crashes, it lets the turn end.
+Bash commands that only look (`cat`, `grep`, `ls`, `git diff` and the like, even chained with `cd`, `&&` or a pipe) aren't a check, and neither is re-reading a file or updating a to-do list. PowerShell commands always count. Editing `.md`, `.rst` or `.adoc` files after the check is fine.
+
+Cited proof means a commit hash, a pass count ("14 passed"), "HTTP 200", "200 OK", "exit code 0", "CI green", or a link to a CI run, commit or pull request.
+
+Claims inside code blocks, double quotes (straight, curly, 「」 or 『』), questions and Markdown table rows are ignored, and so is a phrase in a slash-separated list like "tests pass/fail". A claim doesn't count when the same clause has "not", "no", "never", "nothing", "if", "once", "when", "until", "unless", "before" or an "n't" word before it ("hasn't been deployed", "once tests pass"). It never blocks twice in a row, so the agent can't get stuck, and if the hook itself crashes, it lets the turn end.
 
 ## Install
 
@@ -72,23 +76,25 @@ It reads your past sessions in `~/.claude/projects` and prints how many "done" a
 
 ## Audit it
 
-Every block is written to `~/.claude/claim-check/blocks.jsonl`, and `python3 claim_check.py report` prints the last ten. If it blocked something it shouldn't have, [open an issue](https://github.com/Balance0014/claude-code-claim-check/issues) with the sentence it flagged. I treat every false positive as a bug.
+Every block is written to `~/.claude/claim-check/blocks.jsonl` (set `CLAIM_CHECK_LOG` to move it), and `python3 claim_check.py report` prints the last ten. `CLAIM_CHECK_OFF=1` turns the hook off. If it blocked something it shouldn't have, [open an issue](https://github.com/Balance0014/claude-code-claim-check/issues) with the sentence it flagged. False positives are bugs, and I fix them.
 
 ## What it can't do
 
 - It matches phrases, so "I believe this works" gets through.
 - One honest "not verified" anywhere lets the whole reply through: "The login bug is fixed. I haven't tested signup." passes.
 - A negation earlier in the same clause cancels a claim, so "There were no errors and everything is deployed" gets through.
+- Any 7-to-40-character string of hex letters and digits counts as a commit hash, so an ID like `c1aaf2b7` passes as proof.
+- Any MCP tool call counts as a check, even one that only reads.
 - A command after the edit proves that something ran. It doesn't prove the command tested the right thing.
 - It only understands claims in English and Chinese.
 - Markdown table rows are skipped, so a status table with "fixed" or "已修复" in a cell gets through.
 - A finding that uses claim words, like "I verified that it makes the model worse," is blocked as if it were finished work. So is a condition it doesn't recognize ("after it's merged that's done") or one set off by a comma ("once it's merged, that's done").
-- It tracks edits made with Claude Code's edit tools. A file changed by a shell command such as `sed -i` isn't seen as an edit.
+- It tracks edits made with Claude Code's edit tools. A file changed by a shell command such as `sed -i` isn't seen as an edit, and the `sed` command itself counts as the check.
 - On Windows, if `python3` isn't on your PATH, change it to `python` in `hooks/hooks.json` or your settings.
 
 ## Why I built it
 
-I run a one-person company on 18 Claude Code sessions and about 20 scheduled AI jobs ([how that works](https://github.com/Balance0014/one-person-ai-company); this tool is [chapter 5](https://github.com/Balance0014/one-person-ai-company/blob/main/playbook/05-definition-of-done.md) turned into a hook). In the week before the first release, the older version on my machine blocked 19 times.
+I run a one-person company on long-running Claude Code sessions and scheduled AI jobs ([how that works](https://github.com/Balance0014/one-person-ai-company); this tool is [chapter 5](https://github.com/Balance0014/one-person-ai-company/blob/main/playbook/05-definition-of-done.md) turned into a hook). In the week before the first release, the older version on my machine blocked 19 times.
 
 I found a bug in that older version while rewriting it for the first release. It treated tool results as new messages from me, so it only counted the lookups in the agent's very last message. Every search before that was invisible, and it once blocked a "not found" the agent had already checked with several searches. This version starts a turn only at a message a person typed, and there are tests for what the rules should block and what they should let through.
 

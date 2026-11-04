@@ -1,4 +1,4 @@
-"""Each rule has a case it must catch and a case it must let through. No network, no real transcripts."""
+"""What each kind of claim must catch and what it must let through. No network, no real transcripts."""
 import io
 import json
 import os
@@ -85,6 +85,21 @@ class Done(unittest.TestCase):
         self.assertIn('nothing ran in this turn', v[2])
         self.assertIsNone(C.judge(turn(say('Everything is deployed (commit 3f9a2c1, CI green).'))))
 
+    def test_each_kind_of_cited_proof_passes(self):
+        for proof in ('14 passed', '14 tests passed', '12 tests, all pass', 'HTTP 200', 'HTTP/1.1 204',
+                      '200 OK', 'exit code 0', 'CI is green', 'CI passed',
+                      'https://github.com/o/r/actions/runs/123', 'https://github.com/o/r/pull/7',
+                      '12 条测试全通过', '全绿', '退出码 0'):
+            self.assertIsNone(C.judge(turn(say(f'It is deployed: {proof}.'))), proof)
+
+    def test_things_that_look_like_proof_but_are_not(self):
+        for text in ('It is deployed: 14 tests.', 'It is deployed and returns 200.', 'It is deployed on 2026-11-04.'):
+            self.assertEqual(C.judge(turn(say(text)))[0], 'done', text)
+
+    def test_more_english_claims(self):
+        for text in ('It should work now.', 'All set.', 'Tests are green.', 'I verified the fix.', 'The page is live.'):
+            self.assertEqual(C.judge(turn(tool('Edit', file_path='a.py'), say(text)))[0], 'done', text)
+
     def test_saying_not_verified_always_passes(self):
         self.assertIsNone(C.judge(turn(tool('Edit', file_path='app.py'),
                                        say('I fixed the handler but have not verified it yet.'))))
@@ -136,7 +151,7 @@ class Done(unittest.TestCase):
         self.assertIsNone(C.judge(turn(tool('Edit', file_path='a.py'), say('改好了,还没验证。'))))
 
     def test_words_that_only_look_like_claims(self):
-        for text in ('Use the fixed header.', 'GitHub 主页装修好了', '按已验证的格式写', 'Is it fixed?'):
+        for text in ('Use the fixed header.', '客厅装修好了', '按已验证的格式写', 'Is it fixed?'):
             self.assertIsNone(C._first(C.DONE, text), text)
 
 
@@ -160,6 +175,12 @@ class Absent(unittest.TestCase):
 
     def test_questions_are_not_claims(self):
         self.assertIsNone(C.judge(turn(say('Does the old endpoint still exist? 到底存不存在?'))))
+
+    def test_each_kind_of_absent_claim_is_caught(self):
+        for text in ('That file no longer exists.', 'The flag is no longer used.', "The helper isn't used anywhere.",
+                     'parse_token is not referenced anywhere.', 'Nothing imports that module.',
+                     "There are no callers left.", '那个任务没在跑。', '这个函数没人调用。'):
+            self.assertEqual(C.judge(turn(say(text)))[0], 'absent', text)
 
 
 class Turns(unittest.TestCase):
@@ -235,8 +256,8 @@ class FalsePositivesFromReplay(unittest.TestCase):
         self.assertEqual(v[0], 'done')
 
     def test_word_in_a_slash_list_is_a_label(self):
-        self.assertIsNone(C.judge(turn(say('I skip chatter/resolved/ads and keep real questions.'))))
-        self.assertIsNone(C.judge(turn(say('过滤闲聊/已解决/广告,只留真问题。'))))
+        self.assertIsNone(C.judge(turn(say('Each case is marked pass/fixed/skipped in the sheet.'))))
+        self.assertIsNone(C.judge(turn(say('状态分三种:待处理/已解决/已关闭。'))))
 
     def test_claim_in_a_sentence_with_a_path_still_counts(self):
         v = C.judge(turn(tool('Edit', file_path='app.py'), say('The bug in src/auth/login.py is fixed.')))
@@ -245,7 +266,7 @@ class FalsePositivesFromReplay(unittest.TestCase):
         self.assertEqual(v[0], 'done')
 
     def test_chinese_not_checked_yet_is_honest(self):
-        self.assertIsNone(C.judge(turn(say('另一个会话说那个毛病修好了,我还没核。'))))
+        self.assertIsNone(C.judge(turn(say('同事说那个毛病修好了,我还没核。'))))
         self.assertIsNone(C.judge(turn(say('已修复,但还未核。'))))
         self.assertIsNone(C.judge(turn(say('已上线,数字待核。'))))
 
@@ -275,7 +296,7 @@ class ReplayCounts(unittest.TestCase):
             with redirect_stdout(buf):
                 C.replay(d)
         out = buf.getvalue()
-        self.assertIn('2 turns (1 copies from resumed sessions skipped)', out)
+        self.assertIn('2 turns (1 copy from resumed sessions skipped)', out)
         self.assertIn('2 turns end with the claim; 2 had no proof', out)
         self.assertIn('1  nothing ran after the last code edit', out)
         self.assertIn('1  no tool calls in the turn', out)
