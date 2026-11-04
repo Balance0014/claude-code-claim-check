@@ -6,8 +6,8 @@
     "name": "Balance Zhao",
     "url": "https://github.com/Balance0014"
   },
-  "homepage": "https://github.com/Balance0014/claim-check",
-  "repository": "https://github.com/Balance0014/claim-check",
+  "homepage": "https://github.com/Balance0014/claude-code-claim-check",
+  "repository": "https://github.com/Balance0014/claude-code-claim-check",
   "license": "MIT",
   "keywords": ["claude-code", "hooks", "stop-hook", "verification", "quality", "agents"]
 }

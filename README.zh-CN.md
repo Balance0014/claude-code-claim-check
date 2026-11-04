@@ -34,7 +34,7 @@ or say plainly that it is not verified yet.
 **Claude Code 插件:**
 
 ```text
-/plugin marketplace add Balance0014/claim-check
+/plugin marketplace add Balance0014/claude-code-claim-check
 /plugin install claim-check@claim-check
 ```
 
@@ -50,7 +50,7 @@ or say plainly that it is not verified yet.
 }
 ```
 
-**Codex 和其他 agent:** `npx skills add Balance0014/claim-check` 装的是同一套规矩的技能版。AI 会读,但没有东西强制它照做。Codex 有自己的钩子机制,这一版还没接。
+**Codex 和其他 agent:** `npx skills add Balance0014/claude-code-claim-check` 装的是同一套规矩的技能版。AI 会读,但没有东西强制它照做。Codex 有自己的钩子机制,这一版还没接。
 
 ## 看看你自己的比例
 
@@ -64,7 +64,7 @@ python3 claim_check.py replay
 
 ## 查它有没有拦错
 
-每次拦截都记在 `~/.claude/claim-check/blocks.jsonl`,`python3 claim_check.py report` 列出最近十条。拦错了请[提 issue](https://github.com/Balance0014/claim-check/issues),附上被拦的那句话。误拦就是 bug。
+每次拦截都记在 `~/.claude/claim-check/blocks.jsonl`,`python3 claim_check.py report` 列出最近十条。拦错了请[提 issue](https://github.com/Balance0014/claude-code-claim-check/issues),附上被拦的那句话。误拦就是 bug。
 
 ## 它做不到的
 

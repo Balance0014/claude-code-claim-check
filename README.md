@@ -34,7 +34,7 @@ Claims inside code blocks, quotes and questions are ignored. It never blocks twi
 **Claude Code**, as a plugin:
 
 ```text
-/plugin marketplace add Balance0014/claim-check
+/plugin marketplace add Balance0014/claude-code-claim-check
 /plugin install claim-check@claim-check
 ```
 
@@ -50,7 +50,7 @@ Then start a new session.
 }
 ```
 
-**Codex and other agents:** `npx skills add Balance0014/claim-check` installs the same rules as a skill. The agent reads them; nothing enforces them. Codex has its own hook system, and an adapter for it isn't in this release.
+**Codex and other agents:** `npx skills add Balance0014/claude-code-claim-check` installs the same rules as a skill. The agent reads them; nothing enforces them. Codex has its own hook system, and an adapter for it isn't in this release.
 
 ## See your own number
 
@@ -64,7 +64,7 @@ It reads your past sessions in `~/.claude/projects` and prints how often a "done
 
 ## Audit it
 
-Every block is written to `~/.claude/claim-check/blocks.jsonl`, and `python3 claim_check.py report` prints the last ten. If it blocked something it shouldn't have, [open an issue](https://github.com/Balance0014/claim-check/issues) with the sentence it flagged. False positives are bugs.
+Every block is written to `~/.claude/claim-check/blocks.jsonl`, and `python3 claim_check.py report` prints the last ten. If it blocked something it shouldn't have, [open an issue](https://github.com/Balance0014/claude-code-claim-check/issues) with the sentence it flagged. False positives are bugs.
 
 ## What it can't do
 
