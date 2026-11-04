@@ -4,7 +4,7 @@
     "name": "Balance Zhao"
   },
   "metadata": {
-    "description": "Stops your coding agent from saying \"done\" or \"not found\" until it has shown the proof.",
+    "description": "Sends your coding agent back when it says \"done\" or \"not found\" without showing proof.",
     "version": "0.2.0"
   },
   "plugins": [

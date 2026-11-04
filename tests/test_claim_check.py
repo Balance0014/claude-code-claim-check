@@ -70,13 +70,19 @@ class Done(unittest.TestCase):
         v = C.judge(turn(tool('Edit', file_path='app.py'), tool('Read', file_path='app.py'), say('Deployed and working.')))
         self.assertIsNotNone(v)
 
+    def test_chained_or_piped_look_only_commands_are_not_proof(self):
+        for cmd in ('cd repo && git diff', 'cat app.log | grep error', 'grep -E "a|b" app.py'):
+            self.assertIsNotNone(C.judge(turn(tool('Edit', file_path='app.py'), tool('Bash', command=cmd), say('Fixed.'))), cmd)
+        self.assertIsNone(C.judge(turn(tool('Edit', file_path='app.py'), tool('Bash', command='cd repo && pytest'),
+                                       say('Fixed.'))))
+
     def test_updating_notes_after_the_check_is_fine(self):
         self.assertIsNone(C.judge(turn(tool('Edit', file_path='app.py'), tool('Bash', command='pytest'),
                                        tool('Edit', file_path='NOTES.md'), say('Fixed and verified.'))))
 
     def test_report_from_memory_needs_cited_proof(self):
         v = C.judge(turn(say('Everything is deployed.')))
-        self.assertIn('from memory', v[2])
+        self.assertIn('nothing ran in this turn', v[2])
         self.assertIsNone(C.judge(turn(say('Everything is deployed (commit 3f9a2c1, CI green).'))))
 
     def test_saying_not_verified_always_passes(self):
@@ -244,8 +250,13 @@ class FalsePositivesFromReplay(unittest.TestCase):
         self.assertIsNone(C.judge(turn(say('已上线,数字待核。'))))
 
     def test_block_message_offers_citing_proof_only_without_edits(self):
-        self.assertIn('cite the proof', C.message('done', 'Fixed.', 'nothing ran in this turn and no proof is cited'))
-        self.assertNotIn('cite the proof', C.message('done', 'Fixed.', 'nothing ran after the last edit'))
+        self.assertIn('cite proof', C.message('done', 'Fixed', 'nothing ran in this turn and you cited no proof'))
+        self.assertNotIn('cite proof', C.message('done', 'Fixed', 'nothing ran after the last edit'))
+
+    def test_block_message_quotes_the_claim_without_bullets(self):
+        v = C.judge(turn(tool('Edit', file_path='app.py'), say('- ✅ Done: login works again')))
+        self.assertEqual(v[1], 'Done')
+        self.assertEqual(C.judge(turn(tool('Edit', file_path='app.py'), say('Deployed.')))[1], 'Deployed')
 
     def test_plain_chinese_claim_still_blocked(self):
         v = C.judge(turn(tool('Edit', file_path='app.py'), say('已经修好了。')))

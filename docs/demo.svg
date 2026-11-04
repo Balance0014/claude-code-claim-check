@@ -9,7 +9,7 @@
 <text x="22" y="88" fill="#8b949e">  ⏺ Update(src/auth/redirect.ts)</text>
 <text x="22" y="110" fill="#d4d4d4">  ⏺ The redirect loop is fixed.</text>
 <text x="22" y="132" fill="#ff7b72" font-weight="600">  Stop hook feedback: claim-check: you wrote "is fixed", but nothing ran</text>
-<text x="22" y="154" fill="#ff7b72" font-weight="600">  after the last edit. Run the check that proves it, or say it is not verified yet.</text>
+<text x="22" y="154" fill="#ff7b72" font-weight="600">  after the last edit. Run the check that proves it, or say it isn't verified yet.</text>
 <text x="22" y="176" fill="#8b949e">  ⏺ Bash(npm test -- auth)</text>
 <text x="22" y="198" fill="#7ee787">    ✓ 14 passed (1.2s)</text>
 <text x="22" y="220" fill="#ffffff" font-weight="600">  ⏺ Fixed: the 14 auth tests pass, including the new redirect-loop test.</text>

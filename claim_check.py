@@ -49,8 +49,14 @@ def looks(name):
     return name in LOOKUP_TOOLS or name.startswith('mcp__')
 # Updating notes or docs after a check doesn't undo the check.
 DOC_FILE = re.compile(r'\.(?:md|markdown|rst|adoc)$', re.I)
-# Shell commands that only look at things: a lookup, never proof.
-READ_ONLY_SHELL = re.compile(r'^\s*(?:cat|head|tail|less|more|grep|rg|ls|find|wc|stat|file|pwd|echo|git\s+(?:status|diff|log|show))\b[^;&|]*$')
+# Shell commands that only look at things: a lookup, never proof. Chained or piped, every part has to be one.
+READ_ONLY_CMD = re.compile(r'^\s*(?:cd|cat|head|tail|less|more|grep|rg|ls|find|wc|stat|file|pwd|echo|git\s+(?:status|diff|log|show))\b')
+
+
+def read_only(command):
+    command = re.sub(r"'[^']*'|\"[^\"]*\"", "''", command)        # a | inside quotes is not a pipe
+    parts = [p for p in re.split(r'&&|\|\||[;|\n]', command) if p.strip()]
+    return bool(parts) and all(READ_ONLY_CMD.match(p) for p in parts)
 # A status report with no tool calls passes if it cites its proof.
 PROOF = re.compile(
     r'\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\b'         # commit (letters and digits, so not a date)
@@ -161,7 +167,7 @@ def parse(turn):
                     path = str((i.get('input') or {}).get('file_path') or '')
                     if name in EDIT_TOOLS and DOC_FILE.search(path):
                         name = 'EditDoc'
-                    elif name == 'Bash' and READ_ONLY_SHELL.match(str((i.get('input') or {}).get('command') or '')):
+                    elif name == 'Bash' and read_only(str((i.get('input') or {}).get('command') or '')):
                         name = 'BashRead'
                     actions.append((i.get('id'), name))
                     final = []          # text before a tool call is narration, not the answer
@@ -194,13 +200,14 @@ def judge(turn, final_text=None):
             if not [k for k in ran if k > code_edits[-1]]:
                 return 'done', claim, 'nothing ran after the last edit'
         elif not ran and not PROOF.search(said) and not any(n == 'EditDoc' for _, n in actions):
-            return 'done', claim, ('it is a report from memory with no proof cited (no commit, test result or status code)'
-                                   if not actions else 'nothing ran in this turn and no proof is cited')
+            return 'done', claim, ('nothing ran in this turn and you cited no proof'
+                                   if not actions else 'you only read or searched in this turn and cited no proof')
 
     claim = _first(ABSENT, said)
     lookups = sum(1 for i, n in actions if i not in errors and (looks(n) or n == 'BashRead'))
     if claim and lookups < 2:
-        return 'absent', claim, f'only {lookups} lookup{"" if lookups == 1 else "s"} in this turn'
+        return 'absent', claim, ("you didn't search or read anything in this turn" if not lookups
+                                 else 'you looked only once in this turn')
     return None
 
 
@@ -215,19 +222,18 @@ def _first(patterns, text):
                     continue
                 if LIST_SEP.search(sentence[max(0, m.start() - 1):m.start()] + sentence[m.end():m.end() + 1]):
                     continue                            # "chatter/resolved/ads": a list of labels, not a claim
-                return m.group(0).strip()
+                return re.sub(r'^[\s*✅-]+|(?:\s+and|[\s.!:—-])+$', '', m.group(0))   # "- ✅ Done:" -> "Done"
     return None
 
 
 def message(kind, claim, missing):
     if kind == 'done':
-        cite = '' if 'after the last edit' in missing else ', cite the proof (a commit, test result or status code)'
-        return (f'claim-check: you wrote "{claim}", but {missing}. '
-                f'Run the check that proves it (tests, the command, a request to the live URL) and show the result{cite}, '
-                'or say plainly that it is not verified yet.')
+        how = ('Run the check that proves it (the tests, the script, a request to the live URL) and show the result'
+               if 'after the last edit' in missing else
+               'Run the check and show the result, cite proof you already have (a commit, test result or status code)')
+        return f'claim-check: you wrote "{claim}", but {missing}. {how}, or say plainly that it isn\'t verified yet.'
     return (f'claim-check: you wrote "{claim}", but {missing}. '
-            'Search or read at least twice before saying something is not there, '
-            'or say it is a guess.')
+            "Search or read at least twice before saying something isn't there, or say it's a guess.")
 
 
 def log_block(payload, kind, claim, missing):
@@ -276,9 +282,9 @@ def check(path):
 
 REASONS = {        # how replay groups the turns it would have blocked
     'nothing ran after the last edit': 'nothing ran after the last code edit',
-    'it is a report from memory with no proof cited (no commit, test result or status code)':
+    'nothing ran in this turn and you cited no proof':
         'no tool calls in the turn and no proof cited (often a summary; the proof may be in an earlier turn)',
-    'nothing ran in this turn and no proof is cited': 'only lookups in the turn, nothing that tests anything',
+    'you only read or searched in this turn and cited no proof': 'only lookups in the turn, nothing that tests anything',
 }
 
 
@@ -335,7 +341,7 @@ def report():
     by = {}
     for r in rows:
         by[r.get('kind')] = by.get(r.get('kind'), 0) + 1
-    print(f'{len(rows)} blocks since {rows[0]["at"]}: ' + ', '.join(f'{k} {v}' for k, v in sorted(by.items())))
+    print(f'{len(rows)} block{"" if len(rows) == 1 else "s"} since {rows[0]["at"]}: ' + ', '.join(f'{k} {v}' for k, v in sorted(by.items())))
     print('Latest ten (check these for false positives):')
     for r in rows[-10:]:
         print(f'  {r["at"]}  {r["kind"]:6}  "{r["claim"]}"  ({r["missing"]})')
