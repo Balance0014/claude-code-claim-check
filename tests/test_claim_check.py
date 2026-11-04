@@ -362,6 +362,71 @@ class ProofAndConditions(unittest.TestCase):
         self.assertIn('"not found / doesn\'t exist": 1 turn ends with the claim; 1 has no proof', buf.getvalue())
 
 
+class EarlierTurns(unittest.TestCase):
+    """A wrap-up with no edits can rely on a check from an earlier turn if no code changed after it."""
+    def verdict(self, *turns_):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, 't.jsonl')
+            with open(path, 'w') as f:
+                f.write('\n'.join(json.dumps(e) for t in turns_ for e in t) + '\n')
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = C.check(path)
+        return code, buf.getvalue()
+
+    def wrap_up(self, text='All done, the login bug is fixed.'):
+        return [you('thanks, anything left?'), say(text)]
+
+    def test_a_check_in_an_earlier_turn_counts(self):
+        tested = turn(tool('Edit', file_path='app.py'), tool('Bash', command='pytest'), say('14 tests pass.'))
+        self.assertEqual(self.verdict(tested, self.wrap_up()), (0, 'claim-check: pass\n'))
+
+    def test_a_check_two_turns_back_still_counts(self):
+        tested = turn(tool('Edit', file_path='app.py'), tool('Bash', command='pytest'), say('14 tests pass.'))
+        looked = [you('where is the config?')] + tool('Read', file_path='config.toml') + [say('It is in config.toml.')]
+        self.assertEqual(self.verdict(tested, looked, self.wrap_up())[0], 0)
+
+    def test_an_edit_after_the_check_still_blocks(self):
+        tested = turn(tool('Bash', command='pytest'), say('14 tests pass.'))
+        edited = [you('rename the helper')] + tool('Edit', file_path='app.py') + [say('Renamed it.')]
+        code, out = self.verdict(tested, edited, self.wrap_up())
+        self.assertEqual(code, 1)
+        self.assertIn('nothing ran in this turn', out)
+
+    def test_a_failed_or_read_only_run_earlier_does_not_count(self):
+        failed = turn(tool('Edit', file_path='app.py'), tool('Bash', error=True, command='pytest'), say('Tests fail.'))
+        self.assertEqual(self.verdict(failed, self.wrap_up())[0], 1)
+        reread = turn(tool('Edit', file_path='app.py'), tool('Bash', command='git diff'), say('Looks right.'))
+        self.assertEqual(self.verdict(reread, self.wrap_up())[0], 1)
+
+    def test_a_turn_with_its_own_edit_needs_its_own_check(self):
+        v = C.judge(turn(tool('Edit', file_path='app.py'), say('Fixed.')), earlier=True)
+        self.assertEqual(v[0], 'done')
+
+    def test_the_hook_reads_earlier_turns(self):
+        tested = turn(tool('Edit', file_path='app.py'), tool('Bash', command='pytest'), say('14 tests pass.'))
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, 't.jsonl')
+        with open(path, 'w') as f:
+            f.write('\n'.join(json.dumps(e) for e in tested + self.wrap_up()) + '\n')
+        C.LOG = os.path.join(d, 'blocks.jsonl')
+        sys.stdin = io.StringIO(json.dumps({'transcript_path': path, 'session_id': 's1'}))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            C.hook()
+        self.assertEqual(buf.getvalue(), '')
+
+    def test_replay_carries_the_check_across_turns(self):
+        t1 = [dict(you('fix it'), uuid='u1')] + tool('Edit', file_path='a.py') + tool('Bash', command='pytest') + [say('Fixed.')]
+        t2 = [dict(you('status?'), uuid='u2'), say('Everything is fixed.')]
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, 'a.jsonl'), 'w') as f:
+                f.write('\n'.join(json.dumps(e) for e in t1 + t2))
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                C.replay(d)
+        self.assertIn('2 turns end with the claim; 0 have no proof', buf.getvalue())
+
 class ReplayCounts(unittest.TestCase):
     def test_copied_turns_count_once_and_reasons_are_split(self):
         t1 = [dict(you('fix it'), uuid='u1')] + tool('Edit', file_path='a.py') + [say('Fixed.')]

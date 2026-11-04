@@ -8,7 +8,7 @@
 
 The two agent replies that have cost me the most time are "it's fixed," when nothing had run since the last edit, and "that isn't used anywhere," after one search. Both sound final, so I moved on, and didn't find out they were wrong until something broke.
 
-On November 4, 2026, I replayed my own Claude Code history through the hook: 3,977 turns, after dropping 1,649 duplicates (resuming a session copies its earlier turns into a new file). Of those, 406 ended with a claim like "done," "fixed," "deployed" or "tests pass," and the hook would have blocked 86. Most of the 86 weren't the case I built it for.
+On November 4, 2026, I replayed my own Claude Code history through the hook: 3,977 turns, after dropping 1,649 duplicates (resuming a session copies its earlier turns into a new file). Of those, 406 ended with a claim like "done," "fixed," "deployed" or "tests pass," and version 0.2.0 would have blocked 86. Most of the 86 weren't the case I built it for.
 
 - 77 had no tool calls at all. Usually that's a wrap-up saying something was fixed or deployed, with no commit, test result or status code in it. The proof may be in an earlier turn, but the wrap-up is what I read, and it doesn't show any.
 - 8 had tool calls, but only reads, searches, read-only commands, to-do updates or failed commands.
@@ -16,9 +16,11 @@ On November 4, 2026, I replayed my own Claude Code history through the hook: 3,9
 
 I hand-checked 24 of the 86: 20 drawn at random when the count was still 82, plus the 4 that later rule changes added. Eighteen were wrap-ups that claimed finished work without citing a commit, test output or status code. Three weren't claims of finished work: a research finding (a change had been tested and made the model worse), a condition (the work would count as done once merged) and a plan for work that hadn't started. The other three could be read either way.
 
+After I posted it, a commenter argued that the 77 matter most, because a hook that blocks a correct wrap-up gets turned off. They had a point: in 76 of the 77, something had run successfully after the last edit, just in an earlier turn. So 0.3.0 counts a check from an earlier turn, as long as no code was edited after it. Of the same 406 claims, it blocks 2: the 1 above, and 1 wrap-up with nothing run since the last edit. The cost is that a wrap-up no longer has to show its proof, so the wrap-ups from my hand check get through now too.
+
 Separately, 17 turns ended by saying something wasn't there, and in 2 of them the agent had looked once or not at all.
 
-When the agent tries to end its turn, the hook compares what the agent claimed with what it actually did since your last message. If the proof isn't there, it sends the agent back once and says what's missing.
+When the agent tries to end its turn, the hook compares what the agent claimed with what it actually did. If the proof isn't there, it sends the agent back once and says what's missing.
 
 ```text
 claim-check: you wrote "is fixed", but nothing ran successfully after the last edit.
@@ -28,11 +30,11 @@ show the result, or say plainly that it isn't verified yet.
 
 ## What it checks
 
-| The agent says | It needs, in this turn |
+| The agent says | It needs |
 | --- | --- |
 | "fixed", "deployed", "tests pass", "done", "已修复", "已上线" | Something that ran **after the last code edit** and didn't fail: a shell command, any MCP tool (browser, API), a URL fetch or a subagent |
-| The same, in a turn with no code edits and nothing run | Proof cited in the reply (see below). A turn that only edits docs passes. |
-| "doesn't exist", "nothing calls it", "没找到" | At least two reads, searches or commands. |
+| The same, in a turn with no code edits and nothing run | A check from an earlier turn, if no code was edited after it. Otherwise, proof cited in the reply (see below). A turn that only edits docs passes. |
+| "doesn't exist", "nothing calls it", "没找到" | At least two reads, searches or commands in this turn. |
 | "not verified yet", "untested", "还没验证" | Nothing. Saying it isn't verified always passes. |
 
 **Not a check:** commands on a fixed look-only list (`cd`, `cat`, `head`, `tail`, `less`, `more`, `grep`, `rg`, `ls`, `find`, `wc`, `stat`, `file`, `pwd`, `echo`, `git status`, `git diff`, `git log`, `git show`), alone or chained with `&&`, `;`, `||` or a pipe; a command that failed; re-reading a file; updating a to-do list. Every other command counts, even one that only looks, such as `sed -n`, `awk`, `jq` or `git -C repo diff`, and so does any PowerShell command. Editing `.md`, `.markdown`, `.rst` or `.adoc` files after the check is fine.
@@ -97,6 +99,7 @@ Every block is written to `~/.claude/claim-check/blocks.jsonl` (set `CLAIM_CHECK
 - A negation earlier in the same clause cancels a claim, so "The bug that never showed up on staging is fixed" gets through.
 - Any 7-to-40-character string of hex letters and digits counts as a commit hash, so an ID like `a1b2c3d4` passes as proof.
 - Any MCP tool call or subagent counts as a check, even one that only reads.
+- In a turn with no edits, any check from an earlier turn counts if no code was edited after it, even one unrelated to the claim. Tests run in one turn and "Deployed." in the next gets through.
 - A command after the edit proves that something ran. It doesn't prove the command tested the right thing.
 - It only understands claims in English and Chinese.
 - Markdown table rows are skipped, so a status table with "fixed" or "已修复" in a cell gets through.

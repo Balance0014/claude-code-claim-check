@@ -3,11 +3,12 @@
 
 Claude Code runs this as a Stop hook when the agent tries to end its turn. It reads the
 session transcript, looks at what the agent claimed in its final message, and checks what
-the agent actually did since your last message:
+the agent actually did:
 
   * "fixed / deployed / tests pass / done" needs something that ran after the last code
     edit and did not fail: a shell command, an MCP tool, a URL fetch or a subagent. Reading
-    the file you just edited is not proof. A turn with no edits can cite proof instead.
+    the file you just edited is not proof. In a turn with no edits, a run in an earlier turn
+    counts if no code was edited after it; failing that, the reply can cite proof instead.
   * "doesn't exist / not found / nothing calls it" needs at least two lookups.
 
 Missing proof: it blocks once, says exactly what is missing, and the agent either runs
@@ -199,11 +200,23 @@ def parse(turn):
     return actions, errors, strip_quoted(raw), raw
 
 
-def judge(turn, final_text=None):
+def ran_after_edit(turn, state=False):
+    """Carry "something ran successfully after the last code edit" through one more turn."""
+    actions, errors = parse(turn)[:2]
+    for i, n in actions:
+        if n in EDIT_TOOLS:
+            state = False
+        elif i not in errors and runs(n):
+            state = True
+    return state
+
+
+def judge(turn, final_text=None, earlier=False):
     """Return None if the turn is fine, else (kind, claim, what's missing).
 
     final_text: the agent's last message, from the Stop hook's last_assistant_message field.
     The transcript is written asynchronously and can miss that message, so it wins when present.
+    earlier: something ran successfully after the last code edit in an earlier turn (ran_after_edit).
     """
     actions, errors, said, raw = parse(turn)
     if final_text:
@@ -218,8 +231,9 @@ def judge(turn, final_text=None):
         if code_edits:
             if not [k for k in ran if k > code_edits[-1]]:
                 return 'done', claim, 'nothing ran successfully after the last edit'
+        # A wrap-up with no edits can lean on a check from an earlier turn, as long as no code changed since.
         # Proof is looked for in the raw text: a hash in backticks or before a question still counts.
-        elif not ran and not has_proof(raw) and not any(n == 'EditDoc' for _, n in actions):
+        elif not ran and not earlier and not has_proof(raw) and not any(n == 'EditDoc' for _, n in actions):
             return 'done', claim, ('nothing ran in this turn and you cited no proof' if not actions else
                                    'nothing you ran in this turn tested anything (only lookups, to-do updates or failed commands), '
                                    'and you cited no proof')
@@ -302,8 +316,8 @@ def hook():
         return 0                                    # already blocked once; let it stop
     path = payload.get('transcript_path')
     try:
-        last = list(turns(load(path)))[-1]
-        verdict = judge(last, payload.get('last_assistant_message'))
+        last, earlier = last_turn(path)
+        verdict = judge(last, payload.get('last_assistant_message'), earlier)
     except Exception:                               # never block because of our own bug
         return 0
     if verdict:
@@ -315,9 +329,18 @@ def hook():
     return 0
 
 
+def last_turn(path):
+    """The transcript's last turn, and whether something ran after the last code edit before it."""
+    ts = list(turns(load(path)))
+    earlier = False
+    for t in ts[:-1]:
+        earlier = ran_after_edit(t, earlier)
+    return (ts[-1] if ts else None), earlier
+
+
 def check(path):
-    t = list(turns(load(path)))
-    verdict = judge(t[-1]) if t else None
+    last, earlier = last_turn(path)
+    verdict = judge(last, earlier=earlier) if last else None
     print(message(*verdict) if verdict else 'claim-check: pass')
     return 1 if verdict else 0
 
@@ -325,7 +348,7 @@ def check(path):
 REASONS = {        # how replay groups the turns it would have blocked
     'nothing ran successfully after the last edit': 'nothing ran successfully after the last code edit',
     'nothing ran in this turn and you cited no proof':
-        'no tool calls in the turn and no proof cited (often a summary; the proof may be in an earlier turn)',
+        'no tool calls in the turn, nothing run since the last code edit, no proof cited',
     'nothing you ran in this turn tested anything (only lookups, to-do updates or failed commands), and you cited no proof':
         'only lookups, to-do updates or failed commands',
 }
@@ -349,7 +372,9 @@ def replay(root):
             ts = list(turns(load(f)))
         except OSError:
             continue
+        earlier = False
         for t in ts:
+            ok_before, earlier = earlier, ran_after_edit(t, earlier)
             said = parse(t)[2]
             # A resumed or forked session copies earlier turns into a new file. Skip exact copies only:
             # the same message id can also start a turn that went on differently, and that one counts.
@@ -362,7 +387,7 @@ def replay(root):
             for kind, pats in (('done', DONE), ('absent', ABSENT)):
                 if _first(pats, said):
                     seen[kind][0] += 1
-            v = judge(t)
+            v = judge(t, earlier=ok_before)
             if v and v[0] == 'done':
                 seen['done'][1] += 1
                 r = REASONS.get(v[2], v[2])

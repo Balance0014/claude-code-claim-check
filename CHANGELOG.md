@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.0 · 2026-11-04
+
+- A wrap-up with no code edits now passes if a check ran successfully in an earlier turn of the session and no code was edited after it. Before, only the current turn counted. On the author's history this cuts blocked "done" claims from 86 to 2 of 406. Suggested in a Reddit comment.
+
 ## 0.2.0 · 2026-11-04
 
 - Fewer false positives. Hand-checking blocks from the 0.1.0 replay found three kinds, now fixed: claim words inside Markdown table rows, claim words in slash-separated labels ("pass/fixed/skipped", 待处理/已解决/已关闭), and 没核 / 未核 / 待核 ("not checked yet") not being read as an honest "not verified."
