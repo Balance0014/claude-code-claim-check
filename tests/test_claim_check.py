@@ -217,5 +217,46 @@ class Hook(unittest.TestCase):
         self.assertEqual(out, '')
 
 
+
+class FalsePositivesFromReplay(unittest.TestCase):
+    """Cases found by hand-checking a sample of replay blocks (v0.2)."""
+
+    def test_claim_word_in_a_table_is_not_a_claim(self):
+        self.assertIsNone(C.judge(turn(say('| Step | Status |\n|---|---|\n| Login | verified |\n| Deploy | 已验证 |'))))
+
+    def test_claim_in_prose_next_to_a_table_still_counts(self):
+        v = C.judge(turn(tool('Edit', file_path='app.py'), say('| a | b |\n|---|---|\n\nThe login bug is fixed.')))
+        self.assertEqual(v[0], 'done')
+
+    def test_word_in_a_slash_list_is_a_label(self):
+        self.assertIsNone(C.judge(turn(say('I skip chatter/resolved/ads and keep real questions.'))))
+        self.assertIsNone(C.judge(turn(say('过滤闲聊/已解决/广告,只留真问题。'))))
+
+    def test_chinese_not_checked_yet_is_honest(self):
+        self.assertIsNone(C.judge(turn(say('另一页说那个毛病修好了,我还没核。'))))
+
+    def test_plain_chinese_claim_still_blocked(self):
+        v = C.judge(turn(tool('Edit', file_path='app.py'), say('已经修好了。')))
+        self.assertEqual(v[0], 'done')
+
+
+class ReplayCounts(unittest.TestCase):
+    def test_copied_turns_count_once_and_reasons_are_split(self):
+        t1 = [dict(you('fix it'), uuid='u1')] + tool('Edit', file_path='a.py') + [say('Fixed.')]
+        t2 = [dict(you('status?'), uuid='u2'), say('Everything is deployed.')]
+        with tempfile.TemporaryDirectory() as d:
+            for name, entries in (('a.jsonl', t1 + t2), ('b.jsonl', t1)):   # b.jsonl: a resumed session's copy
+                with open(os.path.join(d, name), 'w') as f:
+                    f.write('\n'.join(json.dumps(e) for e in entries))
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                C.replay(d)
+        out = buf.getvalue()
+        self.assertIn('2 turns (1 copies from resumed sessions skipped)', out)
+        self.assertIn('2 turns end with the claim; 2 had no proof', out)
+        self.assertIn('1  nothing ran after the last code edit', out)
+        self.assertIn('1  no tool calls in the turn', out)
+
+
 if __name__ == '__main__':
     unittest.main()

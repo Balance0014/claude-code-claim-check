@@ -83,11 +83,12 @@ ABSENT = [
 ]
 # A claim preceded in its clause by a negation or a condition isn't a claim ("hasn't been deployed", "once tests pass").
 NOT_A_CLAIM = re.compile(r"\b(?:not|never|nothing|no|if|once|when|until|unless|before)\b|n't\b|如果|一旦|等到|假如|要是|没有|还没|尚未|并未|未能", re.I)
+LIST_SEP = re.compile(r'[/／|]')
 # Honest uncertainty always passes.
 HEDGE = (r"\b(?:not|haven't|have not|didn't|did not|couldn't|could not)\s+(?:yet\s+)?"
          r"(?:verified|verify|tested|test|checked|check|run (?:it|them|this|the tests?|the check))\b"
          r"|\b(?:not|haven't|didn't|did not)\s+re-?(?:run|ran|checked|verified|tested)\b"
-         r"|\bunverified\b|\buntested\b|未验证|没验证|未验|没验|没测|未测试|没重新验|没复核")
+         r"|\bunverified\b|\buntested\b|未验证|没验证|未验|没验|没测|未测试|没重新验|没复核|没核|未核|待核")
 
 
 def _text(entry):
@@ -142,7 +143,7 @@ def strip_quoted(text):
     text = re.sub(r'```.*?```', ' ', text, flags=re.S)
     text = re.sub(r'`[^`\n]*`', ' ', text)
     text = re.sub(r'"[^"\n]*"|“[^”\n]*”|「[^」\n]*」|『[^』\n]*』', ' ', text)
-    text = '\n'.join(l for l in text.split('\n') if not l.lstrip().startswith('>'))
+    text = '\n'.join(l for l in text.split('\n') if not l.lstrip().startswith(('>', '|')))   # quotes, table rows
     return re.sub(r'[^。！？!?.,，;；\n]*[?？]', ' ', text)      # questions are not claims
 
 
@@ -212,6 +213,8 @@ def _first(patterns, text):
                 clause = re.split(r'[,，;；:：]', sentence[:m.start()])[-1]
                 if check_negation and NOT_A_CLAIM.search(clause):
                     continue
+                if LIST_SEP.search(sentence[max(0, m.start() - 1):m.start()] + sentence[m.end():m.end() + 1]):
+                    continue                            # "chatter/resolved/ads": a list of labels, not a claim
                 return m.group(0).strip()
     return None
 
@@ -270,29 +273,52 @@ def check(path):
     return 1 if verdict else 0
 
 
+REASONS = {        # how replay groups the turns it would have blocked
+    'nothing ran after the last edit': 'nothing ran after the last code edit',
+    'it is a report from memory with no proof cited (no commit, test result or status code)':
+        'no tool calls in the turn and no proof cited (often a summary; the proof may be in an earlier turn)',
+    'nothing ran in this turn and no proof is cited': 'only lookups in the turn, nothing that tests anything',
+}
+
+
 def replay(root):
     files = glob.glob(os.path.join(root, '**', '*.jsonl'), recursive=True)
-    n_turns = 0
+    n_turns = dups = 0
+    done_seen = set()
     seen = {'done': [0, 0], 'absent': [0, 0]}      # turns with the claim, turns that would be blocked
+    why = {}
     for f in files:
         try:
             ts = list(turns(load(f)))
         except OSError:
             continue
         for t in ts:
-            n_turns += 1
             said = parse(t)[2]
+            # A resumed or forked session copies earlier turns into a new file. Skip exact copies only:
+            # the same message id can also start a turn that went on differently, and that one counts.
+            key = (t[0].get('uuid') or t[0].get('timestamp'), _text(t[0])[:200], said)
+            if key in done_seen:
+                dups += 1
+                continue
+            done_seen.add(key)
+            n_turns += 1
             for kind, pats in (('done', DONE), ('absent', ABSENT)):
                 if _first(pats, said):
                     seen[kind][0] += 1
             v = judge(t)
             if v:
                 seen[v[0]][1] += 1
-    print(f'{len(files)} transcripts, {n_turns} turns.')
+                if v[0] == 'done':
+                    r = REASONS.get(v[2], v[2])
+                    why[r] = why.get(r, 0) + 1
+    print(f'{len(files)} transcripts, {n_turns} turns' + (f' ({dups} copies from resumed sessions skipped).' if dups else '.'))
     for kind, label in (('done', '"done / fixed / deployed"'), ('absent', '"not found / doesn\'t exist"')):
         c, b = seen[kind]
-        print(f'  {label}: {c} turns end with the claim; {b} had no proof ({b / c:.0%}).' if c
+        print(f'  {label}: {c} turns end with the claim; {b} had no proof by these rules ({b / c:.0%}).' if c
               else f'  {label}: no such claims.')
+        if kind == 'done':
+            for r, n in sorted(why.items(), key=lambda x: -x[1]):
+                print(f'      {n:5}  {r}')
     return 0
 
 
