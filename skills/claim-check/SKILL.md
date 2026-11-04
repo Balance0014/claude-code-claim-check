@@ -33,4 +33,4 @@ Stopping the bleeding is useful. Call it that, not "fixed".
 
 ## If a hook blocked you
 
-The claim-check hook found a claim without proof. Run the check and show the result, or rewrite the sentence as "not verified yet". Do one of the two before you stop again.
+The claim-check hook found a claim without proof. Run the check and show the result, cite proof you already have (a commit, test result or status code) if you changed no code this turn, or rewrite the sentence as "not verified yet". Do one of these before you stop again.

@@ -232,8 +232,20 @@ class FalsePositivesFromReplay(unittest.TestCase):
         self.assertIsNone(C.judge(turn(say('I skip chatter/resolved/ads and keep real questions.'))))
         self.assertIsNone(C.judge(turn(say('过滤闲聊/已解决/广告,只留真问题。'))))
 
+    def test_claim_in_a_sentence_with_a_path_still_counts(self):
+        v = C.judge(turn(tool('Edit', file_path='app.py'), say('The bug in src/auth/login.py is fixed.')))
+        self.assertEqual(v[0], 'done')
+        v = C.judge(turn(tool('Edit', file_path='app.py'), say('已修复 src/auth/login.py 的问题。')))
+        self.assertEqual(v[0], 'done')
+
     def test_chinese_not_checked_yet_is_honest(self):
-        self.assertIsNone(C.judge(turn(say('另一页说那个毛病修好了,我还没核。'))))
+        self.assertIsNone(C.judge(turn(say('另一个会话说那个毛病修好了,我还没核。'))))
+        self.assertIsNone(C.judge(turn(say('已修复,但还未核。'))))
+        self.assertIsNone(C.judge(turn(say('已上线,数字待核。'))))
+
+    def test_block_message_offers_citing_proof_only_without_edits(self):
+        self.assertIn('cite the proof', C.message('done', 'Fixed.', 'nothing ran in this turn and no proof is cited'))
+        self.assertNotIn('cite the proof', C.message('done', 'Fixed.', 'nothing ran after the last edit'))
 
     def test_plain_chinese_claim_still_blocked(self):
         v = C.judge(turn(tool('Edit', file_path='app.py'), say('已经修好了。')))

@@ -221,8 +221,9 @@ def _first(patterns, text):
 
 def message(kind, claim, missing):
     if kind == 'done':
+        cite = '' if 'after the last edit' in missing else ', cite the proof (a commit, test result or status code)'
         return (f'claim-check: you wrote "{claim}", but {missing}. '
-                'Run the check that proves it (tests, the command, a request to the live URL) and show the result, '
+                f'Run the check that proves it (tests, the command, a request to the live URL) and show the result{cite}, '
                 'or say plainly that it is not verified yet.')
     return (f'claim-check: you wrote "{claim}", but {missing}. '
             'Search or read at least twice before saying something is not there, '
