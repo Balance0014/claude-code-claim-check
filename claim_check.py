@@ -19,7 +19,7 @@ Usage:
   claim_check.py                      Stop hook mode (reads the hook payload on stdin)
   claim_check.py check FILE.jsonl     Judge the last turn of a transcript, print the verdict
   claim_check.py replay [DIR]         Judge every turn in past transcripts (default
-                                      ~/.claude/projects) and print how often claims had none
+                                      ~/.claude/projects) and print how many claims came without proof
   claim_check.py report               Summarize the block log
 
 Standard library only. Python 3.9+.
@@ -61,8 +61,10 @@ def read_only(command):
 # A status report with no tool calls passes if it cites its proof.
 PROOF = re.compile(
     r'\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\b'         # commit (letters and digits, so not a date)
-    r'|\b\d+\s+(?:tests?\s+)?(?:passed|passing)\b|\b\d+\s+tests?\b.{0,20}\b(?:pass|ok|green)'
-    r'|\bHTTP\s*/?[\d.]*\s*\d{3}\b|\b(?:200|201|204)\s+OK\b|\bexit(?: code| status)?\s*[=:]?\s*0\b'
+    # A pass count, but not "0 passed" and not one followed by failures ("2 passed, 3 failed").
+    r'|\b[1-9]\d*\s+(?:tests?\s+)?(?:passed|passing)\b(?!,?\s*(?:and\s+)?[1-9]\d*\s+(?:tests?\s+)?fail)'
+    r'|\b[1-9]\d*\s+tests?\b(?:(?!fail)[^.\n]){0,20}\b(?:pass|ok|green)'
+    r'|\bHTTP\s*/?[\d.]*\s*2\d\d\b|\b(?:200|201|204)\s+OK\b|\bexit(?: code| status)?\s*[=:]?\s*0\b'
     r'|\bCI\s+(?:is\s+)?(?:green|passed)|https?://\S+/(?:actions/runs|commit|pull)/\S+'
     r'|\d+\s*(?:条|项|个)\s*(?:测试)?\s*(?:全)?(?:过|通过)|全绿|退出码\s*0', re.I)
 
@@ -88,6 +90,8 @@ ABSENT = [
     # Chinese: only first-person findings. "不存在" and "找不到" are too common in explanations to count.
     r"没找到|没搜到|没人调用|没有调用|没在跑|不在跑|没有用到|没用到",
 ]
+# A "not found" phrase has its own negation, so only a condition cancels it ("if the file doesn't exist, …").
+CONDITION = re.compile(r"\b(?:if|once|when|until|unless|before|make sure|in case)\b|如果|一旦|等到|假如|要是|万一|确保", re.I)
 # A claim preceded in its clause by a negation or a condition isn't a claim ("hasn't been deployed", "once tests pass").
 NOT_A_CLAIM = re.compile(r"\b(?:not|never|nothing|no|if|once|when|until|unless|before)\b|n't\b|如果|一旦|等到|假如|要是|没有|还没|尚未|并未|未能", re.I)
 LIST_SEP = re.compile(r'[/／|]')
@@ -178,7 +182,8 @@ def parse(turn):
             for i in c:
                 if isinstance(i, dict) and i.get('type') == 'tool_result' and i.get('is_error'):
                     errors.add(i.get('tool_use_id'))
-    return actions, errors, strip_quoted('\n'.join(final))
+    raw = '\n'.join(final)
+    return actions, errors, strip_quoted(raw), raw
 
 
 def judge(turn, final_text=None):
@@ -187,9 +192,9 @@ def judge(turn, final_text=None):
     final_text: the agent's last message, from the Stop hook's last_assistant_message field.
     The transcript is written asynchronously and can miss that message, so it wins when present.
     """
-    actions, errors, said = parse(turn)
+    actions, errors, said, raw = parse(turn)
     if final_text:
-        said = strip_quoted(final_text)
+        said, raw = strip_quoted(final_text), final_text
     if not said.strip() or re.search(HEDGE, said, re.I):
         return None
 
@@ -199,10 +204,12 @@ def judge(turn, final_text=None):
         code_edits = [k for k, (_, n) in enumerate(actions) if n in EDIT_TOOLS]
         if code_edits:
             if not [k for k in ran if k > code_edits[-1]]:
-                return 'done', claim, 'nothing ran after the last edit'
-        elif not ran and not PROOF.search(said) and not any(n == 'EditDoc' for _, n in actions):
-            return 'done', claim, ('nothing ran in this turn and you cited no proof'
-                                   if not actions else 'nothing you ran in this turn tests anything, and you cited no proof')
+                return 'done', claim, 'nothing ran successfully after the last edit'
+        # Proof is looked for in the raw text: a hash in backticks or before a question still counts.
+        elif not ran and not PROOF.search(raw) and not any(n == 'EditDoc' for _, n in actions):
+            return 'done', claim, ('nothing ran in this turn and you cited no proof' if not actions else
+                                   'nothing in this turn tested anything (only lookups, to-do updates or failed commands), '
+                                   'and you cited no proof')
 
     claim = _first(ABSENT, said)
     lookups = sum(1 for i, n in actions if i not in errors and (looks(n) or n == 'BashRead'))
@@ -214,12 +221,12 @@ def judge(turn, final_text=None):
 
 def _first(patterns, text):
     """First claim in the text. "Done" claims don't count when a negation or condition comes first in the clause."""
-    check_negation = patterns is DONE
+    cancels = NOT_A_CLAIM if patterns is DONE else CONDITION
     for sentence in re.split(r'(?<=[.!?。！？])\s+|\n', text):
         for p in patterns:
             for m in re.finditer(p, sentence, re.I):
                 clause = re.split(r'[,，;；:：]', sentence[:m.start()])[-1]
-                if check_negation and NOT_A_CLAIM.search(clause):
+                if cancels.search(clause):
                     continue
                 if LIST_SEP.search(sentence[max(0, m.start() - 1):m.start()] + sentence[m.end():m.end() + 1]):
                     continue                            # "pass/fail/skip": a list of labels, not a claim
@@ -260,6 +267,8 @@ def hook():
         payload = json.loads(read_stdin() or '{}')
     except ValueError:
         return 0
+    if not isinstance(payload, dict):
+        return 0
     if payload.get('stop_hook_active') or os.environ.get('CLAIM_CHECK_OFF'):
         return 0                                    # already blocked once; let it stop
     path = payload.get('transcript_path')
@@ -270,7 +279,10 @@ def hook():
         return 0
     if verdict:
         log_block(payload, *verdict)
-        print(json.dumps({'decision': 'block', 'reason': message(*verdict)}))   # ASCII-safe for Windows consoles
+        # additionalContext keeps Claude going, like decision "block", with the same loop protection
+        # (stop_hook_active), but shows as "Stop hook feedback" instead of a hook error.
+        print(json.dumps({'hookSpecificOutput': {'hookEventName': 'Stop',            # ASCII-safe for Windows consoles
+                                                 'additionalContext': message(*verdict)}}))
     return 0
 
 
@@ -282,10 +294,11 @@ def check(path):
 
 
 REASONS = {        # how replay groups the turns it would have blocked
-    'nothing ran after the last edit': 'nothing ran after the last code edit',
+    'nothing ran successfully after the last edit': 'nothing ran successfully after the last code edit',
     'nothing ran in this turn and you cited no proof':
         'no tool calls in the turn and no proof cited (often a summary; the proof may be in an earlier turn)',
-    'nothing you ran in this turn tests anything, and you cited no proof': 'only lookups in the turn, nothing that tests anything',
+    'nothing in this turn tested anything (only lookups, to-do updates or failed commands), and you cited no proof':
+        'only lookups, to-do updates or failed commands',
 }
 
 
@@ -294,6 +307,9 @@ def _n(n, one, many=None):
 
 
 def replay(root):
+    if not os.path.isdir(root):
+        print(f'No such directory: {root}')
+        return 1
     files = glob.glob(os.path.join(root, '**', '*.jsonl'), recursive=True)
     n_turns = dups = 0
     done_seen = set()
@@ -327,7 +343,7 @@ def replay(root):
           + (f' ({_n(dups, "copy", "copies")} from resumed sessions skipped).' if dups else '.'))
     for kind, label in (('done', '"done / fixed / deployed"'), ('absent', '"not found / doesn\'t exist"')):
         c, b = seen[kind]
-        print(f'  {label}: {_n(c, "turn ends", "turns end")} with the claim; {b} had no proof by these rules ({b / c:.0%}).' if c
+        print(f'  {label}: {_n(c, "turn ends", "turns end")} with the claim; {b} have no proof by these rules ({b / c:.0%}).' if c
               else f'  {label}: no such claims.')
         if kind == 'done':
             for r, n in sorted(why.items(), key=lambda x: -x[1]):
@@ -337,21 +353,30 @@ def replay(root):
 
 def report():
     try:
-        rows = [json.loads(l) for l in open(LOG, encoding='utf-8') if l.strip()]
+        rows = []
+        with open(LOG, encoding='utf-8') as f:
+            for l in f:
+                try:
+                    rows.append(json.loads(l))
+                except ValueError:
+                    pass                            # a line cut off mid-write
     except OSError:
         print(f'No blocks logged yet ({LOG}).')
         return 0
     if not rows:
         print(f'No blocks logged yet ({LOG}).')
         return 0
+    label = {'done': 'done', 'absent': 'not found'}
     by = {}
     for r in rows:
-        by[r.get('kind')] = by.get(r.get('kind'), 0) + 1
-    print(f'{len(rows)} block{"" if len(rows) == 1 else "s"} since {rows[0]["at"]}: ' + ', '.join(f'{k} {v}' for k, v in sorted(by.items())))
+        k = label.get(r.get('kind'), r.get('kind'))
+        by[k] = by.get(k, 0) + 1
+    print(f'{_n(len(rows), "block")} since {rows[0].get("at")}: ' + ', '.join(f'{v} {k}' for k, v in sorted(by.items())))
     shown = min(10, len(rows))
-    print(('The block' if shown == 1 else f'The latest {shown}') + ' (check for false positives):')
+    print('Last block (check it for false positives):' if shown == 1
+          else f'Last {shown} blocks (check them for false positives):')
     for r in rows[-10:]:
-        print(f'  {r["at"]}  {r["kind"]:6}  "{r["claim"]}"  ({r["missing"]})')
+        print(f'  {r.get("at")}  {label.get(r.get("kind"), r.get("kind")):9}  "{r.get("claim")}"  ({r.get("missing")})')
     return 0
 
 

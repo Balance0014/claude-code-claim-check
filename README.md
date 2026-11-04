@@ -8,22 +8,22 @@
 
 The two agent replies that have cost me the most time are "it's fixed," when nothing had run since the last edit, and "that isn't used anywhere," after one search. Both sound final, so I moved on, and didn't find out they were wrong until something broke.
 
-On November 4, 2026, I replayed my own Claude Code history through the hook: 3,977 turns, after dropping 1,649 duplicates (resuming a session copies its earlier turns into a new file). Of those, 404 ended with a claim like "done," "fixed," "deployed" or "tests pass," and the hook would have blocked 82. Most of the 82 weren't the case I built it for.
+On November 4, 2026, I replayed my own Claude Code history through the hook: 3,977 turns, after dropping 1,649 duplicates (resuming a session copies its earlier turns into a new file). Of those, 404 ended with a claim like "done," "fixed," "deployed" or "tests pass," and the hook would have blocked 85. Most of the 85 weren't the case I built it for.
 
 - 76 had no tool calls at all. Usually that's a wrap-up saying something was fixed or deployed, with no commit, test result or status code in it. The proof may be in an earlier turn, but the wrap-up is what I read, and it doesn't show any.
-- 5 had tool calls, but only reads, searches, read-only commands, to-do updates or failed commands.
+- 8 had tool calls, but only reads, searches, read-only commands, to-do updates or failed commands.
 - 1 made the claim after a code edit with nothing run since. That's the case I built the hook for. It's probably rare here because an older version was already catching it on my machine. Your count may be higher.
 
-I read a random 20 of the 82. Sixteen were wrap-ups that claimed finished work and cited nothing. Two weren't claims of finished work: one reported a research finding (a change had been tested and made the model worse), and one was a condition (the work would count as done once merged). The other two could be read either way.
+I read 23 of the 85: 20 picked at random before a later rule change, when the count was 82, and the 3 that change added. Seventeen were wrap-ups that claimed finished work without citing a commit, test output or status code. Three weren't claims of finished work: a research finding (a change had been tested and made the model worse), a condition (the work would count as done once merged) and a plan for work that hadn't started. The other three could be read either way.
 
-Separately, 18 turns ended by saying something wasn't there, and in 2 of them the agent had looked once or not at all.
+Separately, 17 turns ended by saying something wasn't there, and in 2 of them the agent had looked once or not at all.
 
 When the agent tries to end its turn, the hook compares what the agent claimed with what it actually did since your last message. If the proof isn't there, it sends the agent back once and says what's missing.
 
 ```text
-claim-check: you wrote "is fixed", but nothing ran after the last edit. Run the check
-that proves it (the tests, the script, a request to the live URL) and show the result,
-or say plainly that it isn't verified yet.
+claim-check: you wrote "is fixed", but nothing ran successfully after the last edit.
+Run the check that proves it (the tests, the script, a request to the live URL) and
+show the result, or say plainly that it isn't verified yet.
 ```
 
 ## What it checks
@@ -35,11 +35,11 @@ or say plainly that it isn't verified yet.
 | "doesn't exist", "nothing calls it", "没找到" | At least two reads, searches or commands. |
 | "not verified yet", "untested", "还没验证" | Nothing. An honest answer always passes. |
 
-Bash commands that only look (`cat`, `grep`, `ls`, `git diff` and the like, even chained with `cd`, `&&` or a pipe) aren't a check, and neither is re-reading a file or updating a to-do list. PowerShell commands always count. Editing `.md`, `.rst` or `.adoc` files after the check is fine.
+Bash commands on a fixed look-only list (`cd`, `cat`, `head`, `tail`, `less`, `more`, `grep`, `rg`, `ls`, `find`, `wc`, `stat`, `file`, `pwd`, `echo`, `git status`, `git diff`, `git log`, `git show`), alone or chained with `&&`, `;`, `||` or a pipe, don't count as a check. Neither does a command that failed, re-reading a file or updating a to-do list. Every other command counts, even one that only looks, such as `sed -n`, `awk`, `jq` or `git -C repo diff`. PowerShell commands always count. Editing `.md`, `.markdown`, `.rst` or `.adoc` files after the check is fine.
 
-Cited proof means a commit hash, a pass count ("14 passed"), "HTTP 200", "200 OK", "exit code 0", "CI green", or a link to a CI run, commit or pull request.
+Cited proof means a commit hash, a pass count with no failures after it ("14 passed", but not "0 passed" or "2 passed, 3 failed"), a 2xx HTTP status ("HTTP 200", "201 OK"), "exit code 0", "CI green", or a link to a GitHub Actions run, a commit or a pull request. The Chinese equivalents (12 条测试全通过, 退出码 0, 全绿) count too.
 
-Claims inside code blocks, double quotes (straight, curly, 「」 or 『』), questions and Markdown table rows are ignored, and so is a phrase in a slash-separated list like "tests pass/fail". A claim doesn't count when the same clause has "not", "no", "never", "nothing", "if", "once", "when", "until", "unless", "before" or an "n't" word before it ("hasn't been deployed", "once tests pass"). It never blocks twice in a row, so the agent can't get stuck, and if the hook itself crashes, it lets the turn end.
+Claims inside code blocks, inline code, double quotes (straight, curly, 「」 or 『』), blockquotes, questions and Markdown table rows are ignored, and so is a phrase in a slash-separated list like "tests pass/fail". A "done" claim doesn't count when the same clause has a negation or a condition before it: "not", "no", "never", "nothing", an "n't" word, "if", "once", "when", "until", "unless", "before" or their Chinese equivalents ("hasn't been deployed", "once tests pass"). A "not found" claim doesn't count after a condition, which also covers "make sure" and "in case" ("If the config file doesn't exist, the script creates it"). It never blocks twice in a row, so the agent can't get stuck, and if the hook itself crashes, it lets the turn end.
 
 ## Install
 
@@ -50,7 +50,7 @@ Claims inside code blocks, double quotes (straight, curly, 「」 or 『』), qu
 /plugin install claim-check@claim-check
 ```
 
-Then start a new session.
+Then run `/reload-plugins` if Claude Code asks, or start a new session.
 
 **Claude Code, without the plugin system:** save `claim_check.py` somewhere and add this to `~/.claude/settings.json`:
 
@@ -76,20 +76,21 @@ It reads your past sessions in `~/.claude/projects` and prints how many "done" a
 
 ## Audit it
 
-Every block is written to `~/.claude/claim-check/blocks.jsonl` (set `CLAIM_CHECK_LOG` to move it), and `python3 claim_check.py report` prints the last ten. `CLAIM_CHECK_OFF=1` turns the hook off. If it blocked something it shouldn't have, [open an issue](https://github.com/Balance0014/claude-code-claim-check/issues) with the sentence it flagged. False positives are bugs, and I fix them.
+Every block is written to `~/.claude/claim-check/blocks.jsonl` (set `CLAIM_CHECK_LOG` to move it). Run `python3 claim_check.py report` in a clone of this repo to print the last ten. To turn the hook off, set `CLAIM_CHECK_OFF` to any value, in the shell that starts Claude Code or under `env` in `settings.json`. If it blocks something it shouldn't, [open an issue](https://github.com/Balance0014/claude-code-claim-check/issues) with the sentence it flagged and I'll fix the rule.
 
 ## What it can't do
 
 - It matches phrases, so "I believe this works" gets through.
-- One honest "not verified" anywhere lets the whole reply through: "The login bug is fixed. I haven't tested signup." passes.
+- One honest "not verified" anywhere lets the whole reply through: "The login bug is fixed. I haven't tested signup." passes, and so does an unrelated negative like "Fixed. Do not test on prod."
 - A negation earlier in the same clause cancels a claim, so "There were no errors and everything is deployed" gets through.
-- Any 7-to-40-character string of hex letters and digits counts as a commit hash, so an ID like `c1aaf2b7` passes as proof.
+- Any 7-to-40-character string of hex letters and digits counts as a commit hash, so an ID like `a1b2c3d4` passes as proof.
 - Any MCP tool call counts as a check, even one that only reads.
 - A command after the edit proves that something ran. It doesn't prove the command tested the right thing.
 - It only understands claims in English and Chinese.
 - Markdown table rows are skipped, so a status table with "fixed" or "已修复" in a cell gets through.
 - A finding that uses claim words, like "I verified that it makes the model worse," is blocked as if it were finished work. So is a condition it doesn't recognize ("after it's merged that's done") or one set off by a comma ("once it's merged, that's done").
 - It tracks edits made with Claude Code's edit tools. A file changed by a shell command such as `sed -i` isn't seen as an edit, and the `sed` command itself counts as the check.
+- Claude Code writes the transcript asynchronously. If the last command hasn't been written when the hook runs, a claim that was checked can be blocked.
 - On Windows, if `python3` isn't on your PATH, change it to `python` in `hooks/hooks.json` or your settings.
 
 ## Why I built it

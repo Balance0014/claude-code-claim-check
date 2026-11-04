@@ -31,7 +31,7 @@ jobs:
             '{"type":"assistant","message":{"content":[{"type":"text","text":"Fixed."}]}}' > "$RUNNER_TEMP/t.jsonl"
           out=$(echo "{\"transcript_path\":\"$RUNNER_TEMP/t.jsonl\"}" | CLAIM_CHECK_LOG="$RUNNER_TEMP/b.jsonl" python claim_check.py)
           echo "$out"
-          echo "$out" | python -c 'import json,sys; assert json.load(sys.stdin)["decision"] == "block"'
+          echo "$out" | python -c 'import json,sys; assert "claim-check:" in json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"]'
           echo '{"transcript_path":"'"$RUNNER_TEMP"'/t.jsonl","stop_hook_active":true}' | python claim_check.py | grep -c . | grep -qx 0
       - name: Plugin files are valid JSON
         run: |

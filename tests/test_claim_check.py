@@ -39,7 +39,7 @@ class Done(unittest.TestCase):
     def test_edit_then_claim_is_blocked(self):
         v = C.judge(turn(tool('Edit', file_path='app.py'), say('Fixed. The login bug is fixed.')))
         self.assertEqual(v[0], 'done')
-        self.assertIn('nothing ran after the last edit', v[2])
+        self.assertIn('nothing ran successfully after the last edit', v[2])
 
     def test_edit_then_test_then_claim_passes(self):
         self.assertIsNone(C.judge(turn(tool('Edit', file_path='app.py'), tool('Bash', command='pytest'),
@@ -92,8 +92,15 @@ class Done(unittest.TestCase):
                       '12 条测试全通过', '全绿', '退出码 0'):
             self.assertIsNone(C.judge(turn(say(f'It is deployed: {proof}.'))), proof)
 
+    def test_proof_in_backticks_or_next_to_a_question_counts(self):
+        for text in ('Everything is deployed (commit `3f9a2c1`).', 'It is deployed: `HTTP 200`.',
+                     'Everything is deployed, commit 3f9a2c1, want me to tag it?'):
+            self.assertIsNone(C.judge(turn(say(text))), text)
+
     def test_things_that_look_like_proof_but_are_not(self):
-        for text in ('It is deployed: 14 tests.', 'It is deployed and returns 200.', 'It is deployed on 2026-11-04.'):
+        for text in ('It is deployed: 14 tests.', 'It is deployed and returns 200.', 'It is deployed on 2026-11-04.',
+                     'It is deployed: HTTP 500.', 'Tests pass: 0 passed, 12 failed.', 'It is fixed: 2 passed, 3 failed.',
+                     'It is fixed: 3 tests fail, 2 pass.'):
             self.assertEqual(C.judge(turn(say(text)))[0], 'done', text)
 
     def test_more_english_claims(self):
@@ -173,6 +180,11 @@ class Absent(unittest.TestCase):
         self.assertEqual(C.judge(turn(say('全仓都没找到这个函数。')))[0], 'absent')
         self.assertIsNone(C._first(C.ABSENT, '如果找不到那个文件夹,看下面的路径'))
 
+    def test_a_condition_cancels_a_not_found_claim(self):
+        for text in ("If the config file doesn't exist, the script creates it.", '如果没找到配置文件，脚本会自动创建。',
+                     'Make sure nothing calls it before you delete it.'):
+            self.assertIsNone(C.judge(turn(say(text))), text)
+
     def test_questions_are_not_claims(self):
         self.assertIsNone(C.judge(turn(say('Does the old endpoint still exist? 到底存不存在?'))))
 
@@ -224,14 +236,14 @@ class Hook(unittest.TestCase):
     def test_blocks_once_and_logs(self):
         code, out, log = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')))
         self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out)['decision'], 'block')
+        self.assertIn('claim-check:', json.loads(out)['hookSpecificOutput']['additionalContext'])
         with open(log) as f:
             self.assertEqual(json.loads(f.readline())['kind'], 'done')
 
     def test_uses_the_final_message_claude_code_passes_in(self):
         # the transcript may not have the last message yet; the payload does
         _, out, _ = self.run_hook(turn(tool('Edit', file_path='a.py')), last_assistant_message='Fixed.')
-        self.assertEqual(json.loads(out)['decision'], 'block')
+        self.assertIn('claim-check:', json.loads(out)['hookSpecificOutput']['additionalContext'])
 
     def test_second_stop_is_let_through(self):
         _, out, _ = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')), stop_hook_active=True)
@@ -242,7 +254,23 @@ class Hook(unittest.TestCase):
         self.assertEqual(C.hook(), 0)
         _, out, _ = self.run_hook([], transcript_path='/nope.jsonl')
         self.assertEqual(out, '')
+        sys.stdin = io.StringIO('[1, 2]')
+        self.assertEqual(C.hook(), 0)
 
+    def test_report_skips_a_line_cut_off_mid_write(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, 'blocks.jsonl')
+            with open(log, 'w') as f:
+                f.write(json.dumps({'at': 't1', 'kind': 'absent', 'claim': 'not found', 'missing': 'x'}) + '\n{"at": "t2", "ki')
+            old, C.LOG = C.LOG, log
+            try:
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    C.report()
+            finally:
+                C.LOG = old
+        self.assertIn('1 block since t1: 1 not found', buf.getvalue())
+        self.assertIn('Last block (check it for false positives):', buf.getvalue())
 
 
 class FalsePositivesFromReplay(unittest.TestCase):
@@ -272,7 +300,7 @@ class FalsePositivesFromReplay(unittest.TestCase):
 
     def test_block_message_offers_citing_proof_only_without_edits(self):
         self.assertIn('cite proof', C.message('done', 'Fixed', 'nothing ran in this turn and you cited no proof'))
-        self.assertNotIn('cite proof', C.message('done', 'Fixed', 'nothing ran after the last edit'))
+        self.assertNotIn('cite proof', C.message('done', 'Fixed', 'nothing ran successfully after the last edit'))
 
     def test_block_message_quotes_the_claim_without_bullets(self):
         v = C.judge(turn(tool('Edit', file_path='app.py'), say('- ✅ Done: login works again')))
@@ -297,8 +325,8 @@ class ReplayCounts(unittest.TestCase):
                 C.replay(d)
         out = buf.getvalue()
         self.assertIn('2 turns (1 copy from resumed sessions skipped)', out)
-        self.assertIn('2 turns end with the claim; 2 had no proof', out)
-        self.assertIn('1  nothing ran after the last code edit', out)
+        self.assertIn('2 turns end with the claim; 2 have no proof', out)
+        self.assertIn('1  nothing ran successfully after the last code edit', out)
         self.assertIn('1  no tool calls in the turn', out)
 
 
