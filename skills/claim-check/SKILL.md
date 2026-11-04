@@ -13,7 +13,7 @@ Two kinds of sentence cause most of the damage when they are wrong: "it's fixed"
 2. Put the result in your answer: how many tests passed, the status code, the commit, the exit code.
 3. If you edited again after that run, run it again. A check from before the last edit proves nothing about the code now.
 4. Re-reading the file you just edited is not a check.
-5. If you can't run the check, say so: "changed, not verified yet". That is a complete, honest answer.
+5. If you can't run the check, say so: "changed, not verified yet". That's an acceptable answer.
 
 ## Before you say something doesn't exist or isn't used
 
@@ -29,8 +29,8 @@ A real fix covers five things. Say which ones you did, and which you skipped:
 4. **Verification.** You ran the real thing and saw it work.
 5. **Cleanup.** No temporary files, debug output or backup copies left behind.
 
-Stopping the bleeding is useful. Call it that, not "fixed".
+A workaround that stops the symptom is fine. Call it a workaround, not a fix.
 
 ## If a hook blocked you
 
-The claim-check hook found a claim without proof. Run the check and show the result, cite proof you already have (a commit, test result or status code) if you changed no code this turn, or rewrite the sentence as "not verified yet". Do one of these before you stop again.
+The claim-check hook found a claim without proof. Run the check and show the result, cite proof you already have (a commit hash, a line like "14 passed" or "HTTP 200") if you changed no code this turn, or rewrite the sentence as "not verified yet". Do one of these before you stop again.

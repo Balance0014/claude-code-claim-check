@@ -51,22 +51,30 @@ def looks(name):
 # Updating notes or docs after a check doesn't undo the check.
 DOC_FILE = re.compile(r'\.(?:md|markdown|rst|adoc)$', re.I)
 # Shell commands that only look at things: a lookup, never proof. Chained or piped, every part has to be one.
-READ_ONLY_CMD = re.compile(r'^\s*(?:cd|cat|head|tail|less|more|grep|rg|ls|find|wc|stat|file|pwd|echo|git\s+(?:status|diff|log|show))\b')
+READ_ONLY_CMD = re.compile(r'^\s*(?:cd|cat|head|tail|less|more|grep|rg|ls|find|wc|stat|file|pwd|echo|git\s+(?:status|diff|log|show))(?=\s|$)')
 
 
 def read_only(command):
+    if '$(' in command or '`' in command:
+        return False                                            # echo $(pytest) runs pytest
     command = re.sub(r"'[^']*'|\"[^\"]*\"", "''", command)        # a | inside quotes is not a pipe
     parts = [p for p in re.split(r'&&|\|\||[;|\n]', command) if p.strip()]
     return bool(parts) and all(READ_ONLY_CMD.match(p) for p in parts)
 # A status report with no tool calls passes if it cites its proof.
 PROOF = re.compile(
-    r'\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}\b'         # commit (letters and digits, so not a date)
-    # A pass count, but not "0 passed" and not one followed by failures ("2 passed, 3 failed").
-    r'|\b[1-9]\d*\s+(?:tests?\s+)?(?:passed|passing)\b(?!,?\s*(?:and\s+)?[1-9]\d*\s+(?:tests?\s+)?fail)'
-    r'|\b[1-9]\d*\s+tests?\b(?:(?!fail)[^.\n]){0,20}\b(?:pass|ok|green)'
-    r'|\bHTTP\s*/?[\d.]*\s*2\d\d\b|\b(?:200|201|204)\s+OK\b|\bexit(?: code| status)?\s*[=:]?\s*0\b'
-    r'|\bCI\s+(?:is\s+)?(?:green|passed)|https?://\S+/(?:actions/runs|commit|pull)/\S+'
-    r'|\d+\s*(?:条|项|个)\s*(?:测试)?\s*(?:全)?(?:过|通过)|全绿|退出码\s*0', re.I)
+    r'(?<![\w-])(?=[0-9a-f]*[a-f])(?=[0-9a-f]*[0-9])[0-9a-f]{7,40}(?![\w-])'   # commit (letters and digits, so not a date; not part of a UUID)
+    r'|\b(?:HTTP(?:/[\d.]+)?|status(?:\s+code)?)\s*[=:]?\s*2\d\d\b|\b2\d\d\s+(?:OK|Created|Accepted|No Content)\b'
+    r'|\bexit(?: code| status)?\s*[=:]?\s*0\b|\bCI\s+(?:is\s+)?(?:green|passed)|https?://\S+/(?:actions/runs|commit|pull)/\S+'
+    r'|(?<!不是)(?<!没有)(?<![没不])全绿|退出码\s*0', re.I)
+# A pass count is proof only on a line with no failures and no "0 passed" (pytest prints "3 failed, 2 passed").
+PASS_COUNT = re.compile(r'\b[1-9]\d*\s+(?:tests?\s+)?(?:passed|passing)\b|\b[1-9]\d*\s+tests?\b(?:(?!fail)[^.\n]){0,20}\b(?:pass|ok|green)'
+                        r'|[1-9]\d*\s*(?:条|项|个)\s*(?:测试)?\s*(?:全)?(?:过|通过)', re.I)
+FAILURES = re.compile(r'\b[1-9]\d*\s+(?:tests?\s+)?(?:fail(?:s|ed|ing|ures?)?|errors?)\b|\b0\s+(?:tests?\s+)?pass'
+                      r'|[1-9]\d*\s*(?:条|项|个)\s*(?:测试)?\s*失败|(?<!\d)0\s*(?:条|项|个)\s*(?:测试)?\s*(?:全)?(?:过|通过)', re.I)
+
+
+def has_proof(text):
+    return bool(PROOF.search(text)) or any(PASS_COUNT.search(l) and not FAILURES.search(l) for l in text.split('\n'))
 
 # "I did it" claims. Phrases, not single words, so "the fixed header" or "done()" don't count.
 DONE = [
@@ -92,8 +100,13 @@ ABSENT = [
 ]
 # A "not found" phrase has its own negation, so only a condition cancels it ("if the file doesn't exist, …").
 CONDITION = re.compile(r"\b(?:if|once|when|until|unless|before|make sure|in case)\b|如果|一旦|等到|假如|要是|万一|确保", re.I)
-# A claim preceded in its clause by a negation or a condition isn't a claim ("hasn't been deployed", "once tests pass").
-NOT_A_CLAIM = re.compile(r"\b(?:not|never|nothing|no|if|once|when|until|unless|before)\b|n't\b|如果|一旦|等到|假如|要是|没有|还没|尚未|并未|未能", re.I)
+# A "done" claim is cancelled by a negation earlier in its clause ("hasn't been deployed"), or by a condition
+# that opens the clause or the sentence ("once tests pass, it's done"). A condition inside a noun phrase
+# doesn't cancel it: "the crash when saving is fixed" is still a claim.
+NEGATION = re.compile(r"\b(?:not|never|nothing|no)\b|n't\b|没有|还没|尚未|并未|未能", re.I)
+OPENS_WITH_CONDITION = re.compile(r"\s*(?:(?:and|but|so|then)\s+)?(?:if|once|when|until|unless|before|after|make sure|in case)\b"
+                                  r"|\s*(?:如果|一旦|等到|假如|要是|万一|确保)", re.I)
+CLAUSE_SEP = re.compile(r"[,，;；:：—–]|\s-\s|\b(?:and|but|so)\b|并且|而且|但是|所以", re.I)
 LIST_SEP = re.compile(r'[/／|]')
 # Honest uncertainty always passes.
 HEDGE = (r"\b(?:not|haven't|have not|didn't|did not|couldn't|could not)\s+(?:yet\s+)?"
@@ -206,11 +219,21 @@ def judge(turn, final_text=None):
             if not [k for k in ran if k > code_edits[-1]]:
                 return 'done', claim, 'nothing ran successfully after the last edit'
         # Proof is looked for in the raw text: a hash in backticks or before a question still counts.
-        elif not ran and not PROOF.search(raw) and not any(n == 'EditDoc' for _, n in actions):
+        elif not ran and not has_proof(raw) and not any(n == 'EditDoc' for _, n in actions):
             return 'done', claim, ('nothing ran in this turn and you cited no proof' if not actions else
                                    'nothing in this turn tested anything (only lookups, to-do updates or failed commands), '
                                    'and you cited no proof')
 
+    return judge_absent(turn, final_text)
+
+
+def judge_absent(turn, final_text=None):
+    """The "not found" half of judge(), on its own, so replay can count both kinds."""
+    actions, errors, said, raw = parse(turn)
+    if final_text:
+        said = strip_quoted(final_text)
+    if not said.strip() or re.search(HEDGE, said, re.I):
+        return None
     claim = _first(ABSENT, said)
     lookups = sum(1 for i, n in actions if i not in errors and (looks(n) or n == 'BashRead'))
     if claim and lookups < 2:
@@ -219,14 +242,19 @@ def judge(turn, final_text=None):
     return None
 
 
+def _cancelled(patterns, sentence, start):
+    if patterns is not DONE:
+        return bool(CONDITION.search(re.split(r'[,，;；:：]', sentence[:start])[-1]))
+    clause = CLAUSE_SEP.split(sentence[:start])[-1]
+    return bool(NEGATION.search(clause) or OPENS_WITH_CONDITION.match(clause) or OPENS_WITH_CONDITION.match(sentence))
+
+
 def _first(patterns, text):
-    """First claim in the text. "Done" claims don't count when a negation or condition comes first in the clause."""
-    cancels = NOT_A_CLAIM if patterns is DONE else CONDITION
+    """First claim in the text, skipping negated and conditional ones (see NEGATION above)."""
     for sentence in re.split(r'(?<=[.!?。！？])\s+|\n', text):
         for p in patterns:
             for m in re.finditer(p, sentence, re.I):
-                clause = re.split(r'[,，;；:：]', sentence[:m.start()])[-1]
-                if cancels.search(clause):
+                if _cancelled(patterns, sentence, m.start()):
                     continue
                 if LIST_SEP.search(sentence[max(0, m.start() - 1):m.start()] + sentence[m.end():m.end() + 1]):
                     continue                            # "pass/fail/skip": a list of labels, not a claim
@@ -238,7 +266,7 @@ def message(kind, claim, missing):
     if kind == 'done':
         how = ('Run the check that proves it (the tests, the script, a request to the live URL) and show the result'
                if 'after the last edit' in missing else
-               'Either run the check and show the result, cite proof you already have (a commit, test result or status code)')
+               'Run the check and show the result, or cite proof you already have (a commit hash, a line like "14 passed" or "HTTP 200")')
         return f'claim-check: you wrote "{claim}", but {missing}. {how}, or say plainly that it isn\'t verified yet.'
     return (f'claim-check: you wrote "{claim}", but {missing}. '
             "Search or read at least twice before saying something isn't there, or say it's a guess.")
@@ -334,16 +362,17 @@ def replay(root):
                 if _first(pats, said):
                     seen[kind][0] += 1
             v = judge(t)
-            if v:
-                seen[v[0]][1] += 1
-                if v[0] == 'done':
-                    r = REASONS.get(v[2], v[2])
-                    why[r] = why.get(r, 0) + 1
+            if v and v[0] == 'done':
+                seen['done'][1] += 1
+                r = REASONS.get(v[2], v[2])
+                why[r] = why.get(r, 0) + 1
+            if judge_absent(t):                     # counted on its own, even when "done" was blocked too
+                seen['absent'][1] += 1
     print(f'{_n(len(files), "transcript")}, {_n(n_turns, "turn")}'
           + (f' ({_n(dups, "copy", "copies")} from resumed sessions skipped).' if dups else '.'))
     for kind, label in (('done', '"done / fixed / deployed"'), ('absent', '"not found / doesn\'t exist"')):
         c, b = seen[kind]
-        print(f'  {label}: {_n(c, "turn ends", "turns end")} with the claim; {b} have no proof by these rules ({b / c:.0%}).' if c
+        print(f'  {label}: {_n(c, "turn ends", "turns end")} with the claim; {b} {"has" if b == 1 else "have"} no proof by these rules ({b / c:.0%}).' if c
               else f'  {label}: no such claims.')
         if kind == 'done':
             for r, n in sorted(why.items(), key=lambda x: -x[1]):
@@ -366,7 +395,7 @@ def report():
     if not rows:
         print(f'No blocks logged yet ({LOG}).')
         return 0
-    label = {'done': 'done', 'absent': 'not found'}
+    label = {'done': '"done"', 'absent': '"not found"'}
     by = {}
     for r in rows:
         k = label.get(r.get('kind'), r.get('kind'))
@@ -376,7 +405,7 @@ def report():
     print('Last block (check it for false positives):' if shown == 1
           else f'Last {shown} blocks (check them for false positives):')
     for r in rows[-10:]:
-        print(f'  {r.get("at")}  {label.get(r.get("kind"), r.get("kind")):9}  "{r.get("claim")}"  ({r.get("missing")})')
+        print(f'  {r.get("at")}  {label.get(r.get("kind"), r.get("kind")):11}  "{r.get("claim")}"  ({r.get("missing")})')
     return 0
 
 

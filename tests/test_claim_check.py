@@ -269,7 +269,7 @@ class Hook(unittest.TestCase):
                     C.report()
             finally:
                 C.LOG = old
-        self.assertIn('1 block since t1: 1 not found', buf.getvalue())
+        self.assertIn('1 block since t1: 1 "not found"', buf.getvalue())
         self.assertIn('Last block (check it for false positives):', buf.getvalue())
 
 
@@ -310,6 +310,50 @@ class FalsePositivesFromReplay(unittest.TestCase):
     def test_plain_chinese_claim_still_blocked(self):
         v = C.judge(turn(tool('Edit', file_path='app.py'), say('已经修好了。')))
         self.assertEqual(v[0], 'done')
+
+
+class ProofAndConditions(unittest.TestCase):
+    def test_a_pass_count_next_to_failures_is_not_proof(self):
+        for text in ('It is fixed: 3 failed, 2 passed.', 'It is fixed: 1 failed, 14 passed in 2.1s.',
+                     'It is fixed: 10 tests, 0 passed.', '已经修复:5 个通过,3 个失败。', '已经修复:0 个测试通过。'):
+            self.assertEqual(C.judge(turn(say(text)))[0], 'done', text)
+        for text in ('It is fixed: 14 passed, 0 failed.', '已经修复:12 个通过,0 个失败。'):
+            self.assertIsNone(C.judge(turn(say(text))), text)
+
+    def test_status_written_other_ways(self):
+        for proof in ('status 200', 'status code 200', '201 Created', '202 Accepted'):
+            self.assertIsNone(C.judge(turn(say(f'It is deployed: {proof}.'))), proof)
+
+    def test_a_uuid_piece_is_not_a_commit_and_negated_all_green_is_not_proof(self):
+        for text in ('It is deployed, request req-3f9a2c1e-77.', '已经部署,但还不是全绿。'):
+            self.assertEqual(C.judge(turn(say(text)))[0], 'done', text)
+
+    def test_a_condition_inside_a_noun_phrase_does_not_cancel_the_claim(self):
+        for text in ('The crash when saving is fixed.', 'The bug where login fails if the token expires is fixed.',
+                     'The regression from before the upgrade is fixed.', 'No problem — it is fixed.',
+                     'There were no errors and everything is deployed.', '测试没有报错,并且已经上线。', '测试没有报错并且已经上线。'):
+            v = C.judge(turn(tool('Edit', file_path='app.py'), say(text)))
+            self.assertEqual(v and v[0], 'done', text)
+
+    def test_an_opening_condition_or_a_negation_in_the_clause_still_cancels(self):
+        for text in ("Once it's merged, that's done.", "If the tests pass, it's fixed.", "When CI finishes it's deployed.",
+                     "The bug that never showed up on staging is fixed.", '一旦合并,就算做完了。', '没有复现过的那个 bug 已经修好了。'):
+            self.assertIsNone(C.judge(turn(tool('Edit', file_path='app.py'), say(text))), text)
+
+    def test_command_substitution_and_lookalike_names_are_not_read_only(self):
+        self.assertFalse(C.read_only('echo $(pytest)'))
+        self.assertFalse(C.read_only('find-unused-deps'))
+        self.assertTrue(C.read_only('find . -name "*.py" | wc -l'))
+
+    def test_replay_counts_not_found_even_when_done_is_blocked_too(self):
+        t = [dict(you('status?'), uuid='u1'), say("Everything is deployed. The old flag doesn't exist anymore.")]
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, 'a.jsonl'), 'w') as f:
+                f.write('\n'.join(json.dumps(e) for e in t))
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                C.replay(d)
+        self.assertIn('"not found / doesn\'t exist": 1 turn ends with the claim; 1 has no proof', buf.getvalue())
 
 
 class ReplayCounts(unittest.TestCase):
