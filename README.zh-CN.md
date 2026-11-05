@@ -88,7 +88,7 @@ python3 claim_check.py replay
 
 ## 查它有没有拦错
 
-每次拦截都记在 `~/.claude/claim-check/blocks.jsonl`（设 `CLAIM_CHECK_LOG` 可以换位置）。在克隆下来的仓库里运行 `python3 claim_check.py report`，会列出最近十条。要关掉钩子，把 `CLAIM_CHECK_OFF` 设成任意非空值（`0` 也行），设在启动 Claude Code 的终端里，或者写进 `settings.json` 的 `env`。拦错了请[提 issue](https://github.com/Balance0014/claude-code-claim-check/issues)，附上被拦的那句话，我来改规则。
+每次拦截都记在 `~/.claude/claim-check/blocks.jsonl`（设 `CLAIM_CHECK_LOG` 可以换位置）。在克隆下来的仓库里运行 `python3 claim_check.py report`，会列出最近十条。想先试用、不真拦，把 `CLAIM_CHECK_LOG_ONLY` 设成任意非空值：它只记下本来会拦哪些，每一轮都照常放行，你可以先看一周记录，再打开拦截。要关掉钩子，把 `CLAIM_CHECK_OFF` 设成任意非空值（`0` 也行），设在启动 Claude Code 的终端里，或者写进 `settings.json` 的 `env`。拦错了请[提 issue](https://github.com/Balance0014/claude-code-claim-check/issues)，附上被拦的那句话，我来改规则。
 
 ## 它做不到的
 

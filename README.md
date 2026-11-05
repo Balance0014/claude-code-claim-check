@@ -89,7 +89,7 @@ It reads your past sessions in `~/.claude/projects` and prints how many "done" a
 
 ## Audit it
 
-Every block is written to `~/.claude/claim-check/blocks.jsonl` (set `CLAIM_CHECK_LOG` to move it). Run `python3 claim_check.py report` in a clone of this repo to print the last ten. To turn the hook off, set `CLAIM_CHECK_OFF` to any non-empty value (even `0`), in the shell that starts Claude Code or under `env` in `settings.json`. If it blocks something it shouldn't, [open an issue](https://github.com/Balance0014/claude-code-claim-check/issues) with the sentence it flagged and I'll fix the rule.
+Every block is written to `~/.claude/claim-check/blocks.jsonl` (set `CLAIM_CHECK_LOG` to move it). Run `python3 claim_check.py report` in a clone of this repo to print the last ten. To try it without blocking anything, set `CLAIM_CHECK_LOG_ONLY` to any non-empty value: it logs what it would have blocked and lets every turn end, so you can read the log for a week before turning blocking on. To turn the hook off, set `CLAIM_CHECK_OFF` to any non-empty value (even `0`), in the shell that starts Claude Code or under `env` in `settings.json`. If it blocks something it shouldn't, [open an issue](https://github.com/Balance0014/claude-code-claim-check/issues) with the sentence it flagged and I'll fix the rule.
 
 ## What it can't do
 

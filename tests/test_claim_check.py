@@ -251,6 +251,16 @@ class Hook(unittest.TestCase):
         _, out, _ = self.run_hook(turn(tool('Edit', file_path='a.py')), last_assistant_message='Fixed.')
         self.assertIn('claim-check:', json.loads(out)['hookSpecificOutput']['additionalContext'])
 
+    def test_log_only_mode_logs_without_blocking(self):
+        os.environ['CLAIM_CHECK_LOG_ONLY'] = '1'
+        try:
+            _, out, log = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')))
+        finally:
+            del os.environ['CLAIM_CHECK_LOG_ONLY']
+        self.assertEqual(out, '')
+        with open(log) as f:
+            self.assertEqual(json.loads(f.readline())['kind'], 'done')
+
     def test_second_stop_is_let_through(self):
         _, out, _ = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')), stop_hook_active=True)
         self.assertEqual(out, '')

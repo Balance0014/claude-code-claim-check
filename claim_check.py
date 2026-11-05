@@ -322,6 +322,8 @@ def hook():
         return 0
     if verdict:
         log_block(payload, *verdict)
+        if os.environ.get('CLAIM_CHECK_LOG_ONLY'):
+            return 0                                # trial run: log what it would have blocked, let the turn end
         # additionalContext keeps Claude going, like decision "block", with the same loop protection
         # (stop_hook_active), but shows as "Stop hook feedback" instead of a hook error.
         print(json.dumps({'hookSpecificOutput': {'hookEventName': 'Stop',            # ASCII-safe for Windows consoles

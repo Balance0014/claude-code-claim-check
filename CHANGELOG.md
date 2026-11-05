@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.1 · 2026-11-05
+
+- `CLAIM_CHECK_LOG_ONLY`: log what the hook would have blocked without blocking, for a trial run before turning it on. Suggested in a Reddit comment.
+
 ## 0.3.0 · 2026-11-04
 
 - A wrap-up with no code edits now passes if a check ran successfully in an earlier turn of the session and no code was edited after it. Before, only the current turn counted. On the author's history this cuts blocked "done" claims from 86 to 2 of 406. Suggested in a Reddit comment.
