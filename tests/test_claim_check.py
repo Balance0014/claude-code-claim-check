@@ -227,13 +227,46 @@ class Turns(unittest.TestCase):
 
 
 class Hook(unittest.TestCase):
+    _ENV = ('CLAUDE_PLUGIN_DATA', 'CLAUDE_PLUGIN_ROOT', 'CLAUDE_CONFIG_DIR', 'CLAIM_CHECK_OFF',
+            'CLAIM_CHECK_LOG_ONLY', 'CLAUDE_PLUGIN_OPTION_ENABLED', 'CLAUDE_PLUGIN_OPTION_LOG_ONLY', 'HOME')
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.managed = tempfile.mkdtemp()
+        self._old_home, self._old_managed = C.config_home, C.managed_settings_dir
+        self._saved_env = {k: os.environ.get(k) for k in self._ENV}
+        C.config_home = lambda project_dir=None: self.home
+        C.managed_settings_dir = lambda: self.managed
+        for k in self._ENV:
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        C.config_home, C.managed_settings_dir = self._old_home, self._old_managed
+        for k, v in self._saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def write_options(self, plugin_id, directory=None, filename='settings.json', **options):
+        directory = self.home if directory is None else directory
+        os.makedirs(directory, exist_ok=True)
+        path = os.path.join(directory, filename)
+        data = {}
+        if os.path.exists(path):
+            with open(path, encoding='utf-8') as f:
+                data = json.load(f)
+        data.setdefault('pluginConfigs', {})[plugin_id] = {'options': options}
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+
     def run_hook(self, entries, **extra):
         d = tempfile.mkdtemp()
         path = os.path.join(d, 't.jsonl')
         with open(path, 'w') as f:
             f.write('\n'.join(json.dumps(e) for e in entries) + '\n')
         C.LOG = os.path.join(d, 'blocks.jsonl')
-        sys.stdin = io.StringIO(json.dumps(dict({'transcript_path': path, 'session_id': 's1'}, **extra)))
+        sys.stdin = io.StringIO(json.dumps(dict({'transcript_path': path, 'session_id': 's1', 'cwd': d}, **extra)))
         buf = io.StringIO()
         with redirect_stdout(buf):
             code = C.hook()
@@ -251,15 +284,103 @@ class Hook(unittest.TestCase):
         _, out, _ = self.run_hook(turn(tool('Edit', file_path='a.py')), last_assistant_message='Fixed.')
         self.assertIn('claim-check:', json.loads(out)['hookSpecificOutput']['additionalContext'])
 
-    def test_log_only_mode_logs_without_blocking(self):
-        os.environ['CLAIM_CHECK_LOG_ONLY'] = '1'
-        try:
-            _, out, log = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')))
-        finally:
-            del os.environ['CLAIM_CHECK_LOG_ONLY']
+    def test_default_is_on(self):
+        _, out, _ = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')))
+        self.assertIn('claim-check:', json.loads(out)['hookSpecificOutput']['additionalContext'])
+
+    def test_plugin_setting_off_does_not_block_or_log(self):
+        self.write_options('claim-check@claim-check', enabled=False)
+        code, out, log = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')))
+        self.assertEqual((code, out), (0, ''))
+        self.assertFalse(os.path.exists(log))
+
+    def test_log_only_plugin_setting_logs_without_blocking(self):
+        self.write_options('claim-check@buildwithclaude', log_only=True)
+        _, out, log = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')))
         self.assertEqual(out, '')
         with open(log) as f:
             self.assertEqual(json.loads(f.readline())['kind'], 'done')
+
+    def test_off_wins_over_log_only(self):
+        self.write_options('claim-check@claim-check', enabled=False, log_only=True)
+        _, out, log = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')))
+        self.assertEqual(out, '')
+        self.assertFalse(os.path.exists(log))
+
+    def test_a_string_false_does_not_turn_the_hook_off(self):
+        self.write_options('claim-check@claim-check', enabled='false', log_only='true')
+        _, out, log = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')))
+        self.assertIn('claim-check:', json.loads(out)['hookSpecificOutput']['additionalContext'])
+        self.assertTrue(os.path.exists(log))
+
+    def test_env_and_project_files_cannot_disable(self):
+        project = tempfile.mkdtemp()
+        claude_dir = os.path.join(project, '.claude')
+        os.makedirs(claude_dir)
+        for name in ('settings.json', 'settings.local.json'):
+            with open(os.path.join(claude_dir, name), 'w', encoding='utf-8') as f:
+                json.dump({'env': {'CLAIM_CHECK_OFF': '1', 'CLAIM_CHECK_LOG_ONLY': '1',
+                                   'CLAUDE_PLUGIN_OPTION_ENABLED': 'false',
+                                   'CLAUDE_PLUGIN_OPTION_LOG_ONLY': 'true'},
+                           'pluginConfigs': {'claim-check@buildwithclaude':
+                                             {'options': {'enabled': False, 'log_only': True}}}}, f)
+        os.environ.update(CLAIM_CHECK_OFF='1', CLAIM_CHECK_LOG_ONLY='1',
+                          CLAUDE_PLUGIN_OPTION_ENABLED='false', CLAUDE_PLUGIN_OPTION_LOG_ONLY='true',
+                          CLAUDE_CONFIG_DIR=claude_dir, HOME=project)
+        old = os.getcwd()
+        os.chdir(project)
+        try:
+            _, out, _ = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')), cwd=project)
+        finally:
+            os.chdir(old)
+        self.assertIn('claim-check:', json.loads(out)['hookSpecificOutput']['additionalContext'])
+
+    def test_another_marketplace_off_does_not_disable_this_install(self):
+        self.write_options('claim-check@claim-check', enabled=False)
+        os.environ['CLAUDE_PLUGIN_DATA'] = os.path.join(self.home, 'plugins', 'data', 'claim-check-buildwithclaude')
+        _, out, _ = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')))
+        self.assertIn('claim-check:', json.loads(out)['hookSpecificOutput']['additionalContext'])
+
+    def test_this_installs_plugin_setting_off_is_honored(self):
+        self.write_options('claim-check@buildwithclaude', enabled=False)
+        os.environ['CLAUDE_PLUGIN_DATA'] = os.path.join(self.home, 'plugins', 'data', 'claim-check-buildwithclaude')
+        os.environ['CLAUDE_PLUGIN_ROOT'] = os.path.join(
+            self.home, 'plugins', 'cache', 'buildwithclaude', 'claim-check', '0.4.0')
+        _, out, log = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')))
+        self.assertEqual(out, '')
+        self.assertFalse(os.path.exists(log))
+
+    def test_disagreeing_plugin_paths_leave_the_hook_on(self):
+        self.write_options('claim-check@buildwithclaude', enabled=False)
+        os.environ['CLAUDE_PLUGIN_DATA'] = os.path.join(self.home, 'plugins', 'data', 'claim-check-buildwithclaude')
+        os.environ['CLAUDE_PLUGIN_ROOT'] = os.path.join(
+            self.home, 'plugins', 'cache', 'claim-check', 'claim-check', '0.4.0')
+        _, out, _ = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')))
+        self.assertIn('claim-check:', json.loads(out)['hookSpecificOutput']['additionalContext'])
+
+    def test_plugin_data_outside_the_user_dir_cannot_turn_the_hook_off(self):
+        self.write_options('claim-check@claim-check', enabled=False)
+        project = tempfile.mkdtemp()
+        os.environ['CLAUDE_PLUGIN_DATA'] = os.path.join(project, 'data', 'claim-check-claim-check')
+        _, out, _ = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')), cwd=project)
+        self.assertIn('claim-check:', json.loads(out)['hookSpecificOutput']['additionalContext'])
+
+    def test_managed_setting_overrides_the_user(self):
+        self.write_options('claim-check@claim-check', enabled=True)
+        self.write_options('claim-check@claim-check', self.managed, 'managed-settings.json', enabled=False)
+        _, out, log = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')))
+        self.assertEqual(out, '')
+        self.assertFalse(os.path.exists(log))
+        self.write_options('claim-check@claim-check', self.managed, 'managed-settings.json', enabled=True)
+        _, out, _ = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')))
+        self.assertIn('claim-check:', json.loads(out)['hookSpecificOutput']['additionalContext'])
+
+    def test_managed_drop_in_overrides_the_managed_file(self):
+        self.write_options('claim-check@claim-check', self.managed, 'managed-settings.json', enabled=True)
+        drop = os.path.join(self.managed, 'managed-settings.d')
+        self.write_options('claim-check@claim-check', drop, '20-claim-check.json', enabled=False)
+        _, out, _ = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')))
+        self.assertEqual(out, '')
 
     def test_second_stop_is_let_through(self):
         _, out, _ = self.run_hook(turn(tool('Edit', file_path='a.py'), say('Fixed.')), stop_hook_active=True)
@@ -287,6 +408,38 @@ class Hook(unittest.TestCase):
                 C.LOG = old
         self.assertIn('1 block since t1: 1 "not found"', buf.getvalue())
         self.assertIn('Last block (check it for false positives):', buf.getvalue())
+
+
+class ConfigHome(unittest.TestCase):
+    """config_home() itself, with no test double: $HOME and an in-project config dir don't count."""
+
+    def setUp(self):
+        self._saved = {k: os.environ.get(k) for k in ('HOME', 'CLAUDE_CONFIG_DIR')}
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    def test_home_and_an_in_project_config_dir_are_not_the_user_settings(self):
+        project = tempfile.mkdtemp()
+        os.environ['HOME'] = project
+        os.environ['CLAUDE_CONFIG_DIR'] = os.path.join(project, '.claude')
+        os.makedirs(os.environ['CLAUDE_CONFIG_DIR'])
+        with open(os.path.join(project, '.claude', 'settings.json'), 'w', encoding='utf-8') as f:
+            json.dump({'pluginConfigs': {'claim-check@claim-check':
+                                         {'options': {'enabled': False, 'from_project_file': True}}}}, f)
+        self.assertEqual(C.config_home(project), os.path.join(C._home(), '.claude'))
+        self.assertNotIn('from_project_file', C.plugin_options(project))
+
+    def test_a_config_dir_outside_the_project_is_the_plugin_setting(self):
+        home, project = tempfile.mkdtemp(), tempfile.mkdtemp()
+        os.environ['CLAUDE_CONFIG_DIR'] = home
+        with open(os.path.join(home, 'settings.json'), 'w', encoding='utf-8') as f:
+            json.dump({'pluginConfigs': {'claim-check@claim-check': {'options': {'enabled': False}}}}, f)
+        self.assertIs(C.plugin_options(project).get('enabled'), False)
 
 
 class FalsePositivesFromReplay(unittest.TestCase):
@@ -420,10 +573,17 @@ class EarlierTurns(unittest.TestCase):
         with open(path, 'w') as f:
             f.write('\n'.join(json.dumps(e) for e in tested + self.wrap_up()) + '\n')
         C.LOG = os.path.join(d, 'blocks.jsonl')
+        home = tempfile.mkdtemp()
+        old_home, old_managed = C.config_home, C.managed_settings_dir
+        C.config_home = lambda project_dir=None: home
+        C.managed_settings_dir = lambda: home
         sys.stdin = io.StringIO(json.dumps({'transcript_path': path, 'session_id': 's1'}))
         buf = io.StringIO()
-        with redirect_stdout(buf):
-            C.hook()
+        try:
+            with redirect_stdout(buf):
+                C.hook()
+        finally:
+            C.config_home, C.managed_settings_dir = old_home, old_managed
         self.assertEqual(buf.getvalue(), '')
 
     def test_replay_carries_the_check_across_turns(self):

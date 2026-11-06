@@ -1,7 +1,7 @@
 {
   "name": "claim-check",
   "description": "Sends your coding agent back when it says \"done\" or \"not found\" without showing proof.",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "author": {
     "name": "Balance Zhao",
     "url": "https://github.com/Balance0014"
@@ -9,5 +9,19 @@
   "homepage": "https://github.com/Balance0014/claude-code-claim-check",
   "repository": "https://github.com/Balance0014/claude-code-claim-check",
   "license": "MIT",
-  "keywords": ["claude-code", "hooks", "stop-hook", "verification", "quality", "agents"]
+  "keywords": ["claude-code", "hooks", "stop-hook", "verification", "quality", "agents"],
+  "userConfig": {
+    "enabled": {
+      "type": "boolean",
+      "title": "Check claims",
+      "description": "When off, the Stop hook does not run. Saved in your user settings; a project cannot set it.",
+      "default": true
+    },
+    "log_only": {
+      "type": "boolean",
+      "title": "Log only",
+      "description": "Log claims that would have been blocked, and let the turn end. Saved in your user settings; a project cannot set it.",
+      "default": false
+    }
+  }
 }
