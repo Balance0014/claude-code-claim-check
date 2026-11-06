@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.0 · 2026-11-06
+
+- A "not found" claim needs two different kinds of lookup. Searching the same way twice no longer counts, even in another folder or with different flags. A different pattern, a different file, or a different tool does. Reading a file and `cat` on that same file count as one. Suggested in a Reddit comment.
+
 ## 0.4.0 · 2026-11-06
 
 - Removed `CLAIM_CHECK_OFF`. A repository setting, a shell profile, or a command the agent runs could set it, and then the Stop hook never ran. To turn the hook off, set the plugin's `enabled` option to `false`. Claude Code stores that in your user settings (and in managed settings, which win), and does not read it from the project.

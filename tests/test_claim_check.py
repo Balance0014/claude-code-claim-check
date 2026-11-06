@@ -182,6 +182,82 @@ class Absent(unittest.TestCase):
         self.assertIsNone(C.judge(turn(tool('Grep', pattern='parse_token'), tool('Glob', pattern='**/*.py'),
                                        say('parse_token is not used anywhere; nothing calls it.'))))
 
+    def test_parse_keeps_what_each_lookup_was_given(self):
+        actions = C.parse(turn(tool('Grep', pattern='parse_token', path='src'),
+                               tool('Bash', command='grep -n parse_token src'),
+                               tool('Edit', file_path='a.py')))[0]
+        self.assertEqual([(n, inp) for _, n, inp in actions],
+                         [('Grep', {'pattern': 'parse_token', 'path': 'src'}),
+                          ('BashRead', {'command': 'grep -n parse_token src'}),
+                          ('Edit', None)])
+
+    def test_the_same_search_twice_is_not_enough(self):
+        # Another folder, extra flags, or a trailing pipe is still one search.
+        same = (
+            (tool('Grep', pattern='parse_token'), tool('Grep', pattern='parse_token', path='src')),
+            (tool('Grep', pattern='parse_token'), tool('Grep', pattern='parse_token', glob='*.py')),
+            (tool('Grep', pattern='parse_token'), tool('Grep', pattern=' parse_token ')),
+            (tool('Bash', command='grep -n parse_token -r src'), tool('Bash', command='grep parse_token lib')),
+            (tool('Bash', command='cd repo && grep parse_token .'), tool('Bash', command='grep parse_token | wc -l')),
+            (tool('Bash', command='grep -E "a|b" src'), tool('Bash', command="grep -E 'a|b' lib")),
+            (tool('Bash', command="find src -name '*.py'"), tool('Bash', command="find lib -name '*.py'")),
+            (tool('Bash', command='rg -n parse_token src'), tool('Bash', command='rg parse_token lib')),
+            (tool('Glob', pattern='**/*.py', path='src'), tool('Glob', pattern='**/*.py', path='lib')),
+            (tool('Read', file_path='src/app.py'), tool('Read', file_path='./src/app.py')),
+            (tool('Read', file_path='src/app.py'), tool('Bash', command='cat src/app.py')),
+            (tool('Read', file_path='src/app.py'), tool('Bash', command='head -n 40 src/app.py')),
+            (tool('WebSearch', query='parse_token'), tool('WebSearch', query='parse_token')),
+            (tool('Grep', pattern='解析'), tool('Grep', pattern='解析', path='src')),
+            (tool('mcp__code__search', query='parse_token', path='src'),
+             tool('mcp__code__search', path='src', query='parse_token')),
+            (tool('Bash', command='git grep parse_token'), tool('Bash', command='git -C repo grep -n parse_token')),
+            (tool('Bash', command='ls -la ./src'), tool('Bash', command='ls src')),
+        )
+        for first, second in same:
+            v = C.judge(turn(first, second, say('parse_token is not used anywhere.')))
+            self.assertEqual(v[0], 'absent', second)
+            self.assertEqual(v[2], 'you only searched one way in this turn')
+        v = C.judge(turn(tool('Grep', pattern='解析'), tool('Grep', pattern='解析', path='src'),
+                         say('全仓都没找到这个函数。')))
+        self.assertEqual(v[0], 'absent')
+
+    def test_a_different_kind_of_lookup_is_enough(self):
+        pairs = (
+            (tool('Grep', pattern='parse_token'), tool('Grep', pattern='parseToken')),
+            (tool('Grep', pattern='parse_token'), tool('Read', file_path='src/registry.py')),
+            (tool('Grep', pattern='parse_token'), tool('Glob', pattern='**/*token*')),
+            (tool('Grep', pattern='parse_token'), tool('Bash', command='grep -n parse_token -r .')),
+            (tool('Bash', command='grep parse_token -r .'), tool('Bash', command='rg parse_token')),
+            (tool('Bash', command='grep parse_token'), tool('Bash', command='grep parseToken')),
+            (tool('Read', file_path='src/a.py'), tool('Read', file_path='src/b.py')),
+            (tool('WebSearch', query='parse_token'), tool('WebSearch', query='parseToken users')),
+            (tool('Grep', pattern='解析'), tool('Read', file_path='src/app.py')),
+            (tool('mcp__code__search', query='parse_token'), tool('mcp__code__search', query='parseToken')),
+            (tool('Bash', command='git grep parse_token'), tool('Bash', command='grep parse_token')),
+        )
+        for first, second in pairs:
+            self.assertIsNone(C.judge(turn(first, second, say('Nothing calls it.'))), second)
+        self.assertIsNone(C.judge(turn(tool('Grep', pattern='解析'), tool('Read', file_path='src/app.py'),
+                                       say('全仓都没找到这个函数。'))))
+
+    def test_one_lookup_is_still_once_and_a_failed_one_does_not_count(self):
+        v = C.judge(turn(tool('Grep', pattern='parse_token'), say("That helper doesn't exist.")))
+        self.assertEqual(v[2], 'you looked only once in this turn')
+        self.assertIn('at least twice', C.message(*v))
+        v = C.judge(turn(tool('Grep', pattern='parse_token'), tool('Grep', pattern='parse_token', path='src'),
+                         say("That helper doesn't exist.")))
+        self.assertIn('different way', C.message(*v))
+        v = C.judge(turn(tool('Grep', pattern='parse_token'),
+                         tool('Read', error=True, file_path='src/registry.py'),
+                         say("There are no callers.")))
+        self.assertEqual(v[2], 'you looked only once in this turn')
+
+    def test_two_of_the_same_and_one_different_passes(self):
+        self.assertIsNone(C.judge(turn(tool('Grep', pattern='parse_token'),
+                                       tool('Grep', pattern='parse_token', path='src'),
+                                       tool('Read', file_path='src/registry.py'),
+                                       say('Nothing imports that module.'))))
+
     def test_chinese_first_person_findings(self):
         self.assertEqual(C.judge(turn(say('全仓都没找到这个函数。')))[0], 'absent')
         self.assertIsNone(C._first(C.ABSENT, '如果找不到那个文件夹,看下面的路径'))

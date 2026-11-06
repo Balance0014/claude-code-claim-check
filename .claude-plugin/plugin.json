@@ -1,7 +1,7 @@
 {
   "name": "claim-check",
   "description": "Sends your coding agent back when it says \"done\" or \"not found\" without showing proof.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": {
     "name": "Balance Zhao",
     "url": "https://github.com/Balance0014"

@@ -9,7 +9,9 @@ the agent actually did:
     edit and did not fail: a shell command, an MCP tool, a URL fetch or a subagent. Reading
     the file you just edited is not proof. In a turn with no edits, a run in an earlier turn
     counts if no code was edited after it; failing that, the reply can cite proof instead.
-  * "doesn't exist / not found / nothing calls it" needs at least two lookups.
+  * "doesn't exist / not found / nothing calls it" needs at least two lookups, and the
+    second has to be a different kind of search. The same pattern again, in another
+    folder or with different flags, is still one.
 
 Missing proof: it blocks once, says exactly what is missing, and the agent either runs
 the check or says plainly that it has not verified. Saying "not verified" always passes.
@@ -185,12 +187,15 @@ def parse(turn):
                     continue
                 if i.get('type') == 'tool_use':
                     name = i.get('name') or ''
-                    path = str((i.get('input') or {}).get('file_path') or '')
+                    inp = i.get('input') if isinstance(i.get('input'), dict) else {}
+                    path = str(inp.get('file_path') or '')
                     if name in EDIT_TOOLS and DOC_FILE.search(path):
                         name = 'EditDoc'
-                    elif name == 'Bash' and read_only(str((i.get('input') or {}).get('command') or '')):
+                    elif name == 'Bash' and read_only(str(inp.get('command') or '')):
                         name = 'BashRead'
-                    actions.append((i.get('id'), name))
+                    # The input is what tells two searches of the same kind apart.
+                    # Edits don't need it, and a Write can carry the whole file.
+                    actions.append((i.get('id'), name, inp if looks(name) or name == 'BashRead' else None))
                     final = []          # text before a tool call is narration, not the answer
                 elif i.get('type') == 'text':
                     final.append(i.get('text', ''))
@@ -205,7 +210,7 @@ def parse(turn):
 def ran_after_edit(turn, state=False):
     """Carry "something ran successfully after the last code edit" through one more turn."""
     actions, errors = parse(turn)[:2]
-    for i, n in actions:
+    for i, n, _ in actions:
         if n in EDIT_TOOLS:
             state = False
         elif i not in errors and runs(n):
@@ -228,14 +233,14 @@ def judge(turn, final_text=None, earlier=False):
 
     claim = _first(DONE, said)
     if claim:
-        ran = [k for k, (i, n) in enumerate(actions) if i not in errors and runs(n)]
-        code_edits = [k for k, (_, n) in enumerate(actions) if n in EDIT_TOOLS]
+        ran = [k for k, (i, n, _) in enumerate(actions) if i not in errors and runs(n)]
+        code_edits = [k for k, (_, n, _) in enumerate(actions) if n in EDIT_TOOLS]
         if code_edits:
             if not [k for k in ran if k > code_edits[-1]]:
                 return 'done', claim, 'nothing ran successfully after the last edit'
         # A wrap-up with no edits can lean on a check from an earlier turn, as long as no code changed since.
         # Proof is looked for in the raw text: a hash in backticks or before a question still counts.
-        elif not ran and not earlier and not has_proof(raw) and not any(n == 'EditDoc' for _, n in actions):
+        elif not ran and not earlier and not has_proof(raw) and not any(n == 'EditDoc' for _, n, _ in actions):
             return 'done', claim, ('nothing ran in this turn and you cited no proof' if not actions else
                                    'nothing you ran in this turn tested anything (only lookups, to-do updates or failed commands), '
                                    'and you cited no proof')
@@ -243,18 +248,205 @@ def judge(turn, final_text=None, earlier=False):
     return judge_absent(turn, final_text)
 
 
+def _norm(value):
+    return re.sub(r'\s+', ' ', str(value or '')).strip()
+
+
+def _norm_path(value):
+    text = _norm(value).replace('\\', '/')
+    if text.startswith('./'):
+        text = text[2:]
+    return text.rstrip('/')
+
+
+def _unquote(token):
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "'\"":
+        return token[1:-1]
+    return token
+
+
+def _tokens(text):
+    return re.findall(r"'[^']*'|\"[^\"]*\"|\S+", text)
+
+
+def _split_cmd(command):
+    """Split a shell command on pipes and separators, not on a | inside quotes."""
+    saved = []
+
+    def hide(match):
+        saved.append(match.group(0))
+        return '\ue000%d\ue001' % (len(saved) - 1)
+
+    masked = re.sub(r"'[^']*'|\"[^\"]*\"", hide, command)
+    parts = []
+    for piece in re.split(r'&&|\|\||[;|\n]', masked):
+        part = re.sub(r'\ue000(\d+)\ue001', lambda m: saved[int(m.group(1))], piece).strip()
+        if part:
+            parts.append(part)
+    return parts
+
+
+# Flags that take the next word, so `grep -A 3 name` is a search for name, not for 3.
+_OPT_ARG = {
+    'grep': {'-A', '-B', '-C', '-e', '-f', '-m', '--include', '--exclude', '--exclude-dir'},
+    'rg': {'-A', '-B', '-C', '-e', '-g', '-t', '-T', '-m'},
+    'ag': {'-A', '-B', '-C', '-g', '-G'},
+    'ack': {'-A', '-B', '-C'},
+    'fd': {'-e', '-E', '-t', '-g'},
+    'head': {'-n', '-c'},
+    'tail': {'-n', '-c'},
+}
+_PATTERN_FLAG = {'-e', '--regexp'}
+_SKIP_VERB = {'cd', 'pwd', 'echo', 'pushd', 'popd'}
+_READ_VERB = {'cat', 'head', 'tail', 'less', 'more'}
+_SEARCH_VERB = {'grep', 'rg', 'ag', 'ack', 'fd', 'locate', 'find', 'ls', 'git grep'}
+_FIND_NAME = {'-name', '-iname', '-path', '-ipath', '-regex', '-iregex', '-wholename'}
+
+
+def _search_query(verb, tokens):
+    """The word that was searched for: the pattern, not the folder or the flags."""
+    takes = _OPT_ARG.get(verb, ())
+    positionals, forced = [], None
+    i, n = 0, len(tokens)
+    while i < n:
+        t = tokens[i]
+        if t == '--':
+            positionals.extend(_unquote(x) for x in tokens[i + 1:])
+            break
+        if t.startswith('-') and t != '-':
+            name, eq, attached = t.partition('=')
+            arg = attached if eq else None
+            if name in takes or name in _PATTERN_FLAG:
+                if arg is None and i + 1 < n and not tokens[i + 1].startswith('-'):
+                    arg = tokens[i + 1]
+                    i += 1
+                if name in _PATTERN_FLAG and arg is not None:
+                    forced = _unquote(arg)
+                i += 1
+                continue
+            i += 1
+            continue
+        positionals.append(_unquote(t))
+        i += 1
+    if forced is not None:
+        return forced
+    return positionals[0] if positionals else ''
+
+
+def _find_query(tokens):
+    names, i = [], 0
+    while i < len(tokens):
+        if tokens[i] in _FIND_NAME and i + 1 < len(tokens):
+            names.append(_unquote(tokens[i + 1]))
+            i += 2
+            continue
+        i += 1
+    if names:
+        return ' '.join(names)
+    for t in tokens:
+        if not t.startswith('-'):
+            return _unquote(t)
+    return ''
+
+
+def _one_part(tokens):
+    """(program, what it looked for) for one piece of a shell command, or None to ignore it."""
+    verb = tokens[0]
+    if verb == 'git':
+        if 'grep' in tokens:
+            return ('git grep', _norm(_search_query('grep', tokens[tokens.index('grep') + 1:])))
+        args, i = [], 1
+        while i < len(tokens):
+            if tokens[i] in ('-C', '-c') and i + 1 < len(tokens):
+                i += 2                               # git -C repo status is still git status
+                continue
+            if not tokens[i].startswith('-'):
+                args.append(_unquote(tokens[i]))
+            i += 1
+        sub = args[0] if args else ''
+        return ('git ' + sub, _norm(' '.join(args[1:])))
+    if verb in ('grep', 'rg', 'ag', 'ack', 'fd', 'locate'):
+        return (verb, _norm(_search_query(verb, tokens[1:])))
+    if verb == 'find':
+        return ('find', _norm(_find_query(tokens[1:])))
+    if verb == 'ls':
+        return ('ls', _norm_path(_search_query('ls', tokens[1:])))
+    if verb in _READ_VERB:
+        path = _norm_path(_search_query(verb, tokens[1:]))
+        return ('Read', path) if path else None          # `head` at the end of a pipe isn't a lookup
+    args = [_unquote(t) for t in tokens[1:] if not t.startswith('-')]
+    return (verb, _norm(' '.join(args)))
+
+
+def _shell_method(command):
+    """The kind of shell lookup. Flags, folders and a trailing `| wc` don't make a new one."""
+    found = []
+    for part in _split_cmd(command):
+        tokens = _tokens(part)
+        if not tokens or tokens[0] in _SKIP_VERB:
+            continue
+        kind = _one_part(tokens)
+        if kind:
+            found.append(kind)
+    if not found:
+        return ('sh', _norm(command))
+    searches = [k for k in found if k[0] in _SEARCH_VERB or k[0] == 'Read']
+    use = searches or found
+    return use[0] if len(use) == 1 else tuple(use)
+
+
+def method_of(name, inp):
+    """Which kind of lookup this was.
+
+    Two lookups back a "not found" claim only when this differs. The same text
+    searched again, in another folder or with different flags, is the same kind.
+    A different tool, a different pattern or a different file is a different kind.
+    Reading a file and catting that same file are the same kind.
+    """
+    inp = inp if isinstance(inp, dict) else {}
+    if name == 'Grep':
+        return ('Grep', _norm(inp.get('pattern')))
+    if name == 'Glob':
+        return ('Glob', _norm(inp.get('pattern')))
+    if name == 'Read':
+        return ('Read', _norm_path(inp.get('file_path')))
+    if name == 'NotebookRead':
+        return ('NotebookRead', _norm_path(inp.get('notebook_path') or inp.get('file_path')))
+    if name == 'LS':
+        return ('LS', _norm_path(inp.get('path')))
+    if name == 'WebSearch':
+        return ('WebSearch', _norm(inp.get('query')))
+    if name == 'WebFetch':
+        return ('WebFetch', _norm(inp.get('url')))
+    if name in ('Bash', 'BashRead', 'PowerShell'):
+        return _shell_method(str(inp.get('command') or ''))
+    try:
+        raw = json.dumps(inp, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        raw = ''
+    return (name, raw)
+
+
 def judge_absent(turn, final_text=None):
-    """The "not found" half of judge(), on its own, so replay can count both kinds."""
+    """The "not found" half of judge(), on its own, so replay can count both kinds.
+
+    One search repeated is still one. The second lookup has to be a different kind.
+    """
     actions, errors, said, raw = parse(turn)
     if final_text:
         said = strip_quoted(final_text)
     if not said.strip() or re.search(HEDGE, said, re.I):
         return None
     claim = _first(ABSENT, said)
-    lookups = sum(1 for i, n in actions if i not in errors and (looks(n) or n == 'BashRead'))
-    if claim and lookups < 2:
-        return 'absent', claim, ("you didn't search or read anything in this turn" if not lookups
-                                 else 'you looked only once in this turn')
+    methods = [method_of(n, inp) for i, n, inp in actions if i not in errors and (looks(n) or n == 'BashRead')]
+    if claim and len(set(methods)) < 2:
+        if not methods:
+            why = "you didn't search or read anything in this turn"
+        elif len(methods) == 1:
+            why = 'you looked only once in this turn'
+        else:
+            why = 'you only searched one way in this turn'
+        return 'absent', claim, why
     return None
 
 
@@ -285,8 +477,11 @@ def message(kind, claim, missing):
                if 'after the last edit' in missing else
                'Run the check and show the result, or cite proof you already have (a commit hash, a line like "14 passed" or "HTTP 200")')
         return f'claim-check: you wrote "{claim}", but {missing}. {how}, or say plainly that it isn\'t verified yet.'
-    return (f'claim-check: you wrote "{claim}", but {missing}. '
-            "Search or read at least twice before saying something isn't there, or say it's a guess.")
+    if 'one way' in missing:
+        how = "Search a different way (another tool, or a different name or file), or say it's a guess."
+    else:
+        how = "Search or read at least twice before saying something isn't there, or say it's a guess."
+    return f'claim-check: you wrote "{claim}", but {missing}. {how}'
 
 
 def log_block(payload, kind, claim, missing):

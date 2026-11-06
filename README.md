@@ -34,8 +34,10 @@ show the result, or say plainly that it isn't verified yet.
 | --- | --- |
 | "fixed", "deployed", "tests pass", "done", "已修复", "已上线" | Something that ran **after the last code edit** and didn't fail: a shell command, any MCP tool (browser, API), a URL fetch or a subagent |
 | The same, in a turn with no code edits and nothing run | A check from an earlier turn, if no code was edited after it. Otherwise, proof cited in the reply (see below). A turn that only edits docs passes. |
-| "doesn't exist", "nothing calls it", "没找到" | At least two reads, searches or commands in this turn. |
+| "doesn't exist", "nothing calls it", "没找到" | Two lookups in this turn, of different kinds. The same search twice doesn't count. |
 | "not verified yet", "untested", "还没验证" | Nothing. Saying it isn't verified always passes. |
+
+The second lookup has to be a different kind. Searching for the same text again doesn't count, even in another folder or with different flags. A different text, a different file, or a different tool does. Shell `grep` and the Grep tool are different tools, and so are `grep` and `rg`. Reading a file and `cat` (or `head`) on that same file are one lookup.
 
 **Not a check:** commands on a fixed look-only list (`cd`, `cat`, `head`, `tail`, `less`, `more`, `grep`, `rg`, `ls`, `find`, `wc`, `stat`, `file`, `pwd`, `echo`, `git status`, `git diff`, `git log`, `git show`), alone or chained with `&&`, `;`, `||` or a pipe; a command that failed; re-reading a file; updating a to-do list. Every other command counts, even one that only looks, such as `sed -n`, `awk`, `jq` or `git -C repo diff`, and so does any PowerShell command. Editing `.md`, `.markdown`, `.rst` or `.adoc` files after the check is fine.
 
@@ -117,6 +119,7 @@ If it blocks something it shouldn't, [open an issue](https://github.com/Balance0
 - Any MCP tool call or subagent counts as a check, even one that only reads.
 - In a turn with no edits, any check from an earlier turn counts if no code was edited after it, even one unrelated to the claim. Tests run in one turn and "Deployed." in the next gets through.
 - A command after the edit proves that something ran. It doesn't prove the command tested the right thing.
+- For "not found", it only checks that the two lookups weren't the same kind. It can't tell whether the second one could have found the thing.
 - It only understands claims in English and Chinese.
 - Markdown table rows are skipped, so a status table with "fixed" or "已修复" in a cell gets through.
 - A finding that uses claim words, like "I verified that it makes the model worse," is blocked as if it were finished work. So is a condition that comes after the claim ("that's done once it's merged").
