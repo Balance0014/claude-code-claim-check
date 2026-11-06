@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.0 · 2026-11-06
+
+- Removed `CLAIM_CHECK_OFF`. A repository setting, a shell profile, or a command the agent runs could set it, and then the Stop hook never ran. To turn the hook off, set the plugin's `enabled` option to `false`. Claude Code stores that in your user settings (and in managed settings, which win), and does not read it from the project.
+- Removed `CLAIM_CHECK_LOG_ONLY` for the same reason: the project could set it and the hook would stop blocking. A trial run is the plugin's `log_only` option now.
+
 ## 0.3.1 · 2026-11-05
 
 - `CLAIM_CHECK_LOG_ONLY`: log what the hook would have blocked without blocking, for a trial run before turning it on. Suggested in a Reddit comment.

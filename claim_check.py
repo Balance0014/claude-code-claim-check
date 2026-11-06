@@ -14,7 +14,9 @@ the agent actually did:
 Missing proof: it blocks once, says exactly what is missing, and the agent either runs
 the check or says plainly that it has not verified. Saying "not verified" always passes.
 It never blocks twice in a row and never blocks because of its own errors. Every block
-is appended to a log so you can audit false positives.
+is appended to a log so you can audit false positives. Turn it off with the plugin's
+own `enabled` setting, in your user settings. There is no environment variable for
+that, and a project settings file is not read.
 
 Usage:
   claim_check.py                      Stop hook mode (reads the hook payload on stdin)
@@ -305,6 +307,182 @@ def read_stdin():
     return buf.read().decode('utf-8', 'replace') if buf else sys.stdin.read()
 
 
+def _home():
+    """The account's home directory. $HOME is not used: a project env block can set it."""
+    if os.name == 'nt':
+        try:
+            import ctypes
+            buf = ctypes.create_unicode_buffer(260)
+            # CSIDL_PROFILE. Ignores USERPROFILE, which a project env block can set.
+            if ctypes.windll.shell32.SHGetFolderPathW(None, 40, None, 0, buf) == 0 and buf.value:
+                return buf.value
+        except (AttributeError, OSError, ValueError):
+            pass
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except (AttributeError, ImportError, KeyError, OSError):
+        return os.path.expanduser('~')
+
+
+def _inside(path, parent):
+    if not path or not parent:
+        return False
+    try:
+        path, parent = os.path.realpath(path), os.path.realpath(parent)
+    except (OSError, ValueError):
+        return False
+    return path == parent or path.startswith(parent + os.sep)
+
+
+def config_home(project_dir=None):
+    """Where Claude Code keeps user settings. Never a directory inside the project."""
+    # Project and local settings cannot set CLAUDE_CONFIG_DIR. A value that still
+    # points inside the project is ignored, so a repo cannot become the config home.
+    d = os.environ.get('CLAUDE_CONFIG_DIR')
+    if d and os.path.isabs(d) and not _inside(d, project_dir):
+        return d
+    return os.path.join(_home(), '.claude')
+
+
+def managed_settings_dir():
+    """File-based managed settings. Not the project, and not chosen by an env var."""
+    if os.name == 'nt':
+        return 'C:\\Program Files\\ClaudeCode'
+    if sys.platform == 'darwin':
+        return '/Library/Application Support/ClaudeCode'
+    return '/etc/claude-code'
+
+
+def _slug(plugin_id):
+    # Same folding Claude Code uses for ~/.claude/plugins/data/<id>/.
+    return re.sub(r'[^A-Za-z0-9_-]', '-', plugin_id)
+
+
+def _claim_check_id(key):
+    return isinstance(key, str) and (key == 'claim-check' or key.startswith('claim-check@'))
+
+
+def _read_settings(path, project_dir):
+    """Load one settings file. Project .claude/settings*.json is never a plugin setting."""
+    if project_dir:
+        try:
+            real = os.path.realpath(path)
+            local = os.path.realpath(os.path.join(project_dir, '.claude'))
+            if real in (os.path.join(local, 'settings.json'), os.path.join(local, 'settings.local.json')):
+                return {}
+        except (OSError, ValueError):
+            return {}
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _options_map(data):
+    configs = data.get('pluginConfigs') if isinstance(data, dict) else None
+    if not isinstance(configs, dict):
+        return {}
+    out = {}
+    for key, entry in configs.items():
+        if not _claim_check_id(key) or not isinstance(entry, dict):
+            continue
+        options = entry.get('options')
+        if isinstance(options, dict):
+            out[key] = dict(options)
+    return out
+
+
+def _merge_options(base, extra):
+    merged = {k: dict(v) for k, v in base.items()}
+    for key, options in extra.items():
+        merged.setdefault(key, {}).update(options)
+    return merged
+
+
+def _managed_maps(project_dir):
+    root = managed_settings_dir()
+    if not root or _inside(root, project_dir):
+        return {}
+    merged = _options_map(_read_settings(os.path.join(root, 'managed-settings.json'), project_dir))
+    dropin = os.path.join(root, 'managed-settings.d')
+    if not os.path.isdir(dropin) or _inside(dropin, project_dir):
+        return merged
+    for name in sorted(os.listdir(dropin)):
+        if name.startswith('.') or not name.endswith('.json'):
+            continue
+        merged = _merge_options(merged, _options_map(_read_settings(os.path.join(dropin, name), project_dir)))
+    return merged
+
+
+def _saved_options(project_dir):
+    """Plugin options from user settings, then managed settings. Managed keys win."""
+    home = config_home(project_dir)
+    user = _options_map(_read_settings(os.path.join(home, 'settings.json'), project_dir))
+    return _merge_options(user, _managed_maps(project_dir)), home
+
+
+def _id_from_data(home, known):
+    """Plugin id from CLAUDE_PLUGIN_DATA, or '' if the variable is set but not ours."""
+    raw = os.environ.get('CLAUDE_PLUGIN_DATA')
+    if not raw:
+        return None
+    root = os.path.join(home, 'plugins', 'data')
+    try:
+        data, root = os.path.realpath(raw), os.path.realpath(root)
+    except (OSError, ValueError):
+        return ''
+    if os.path.dirname(data) != root:
+        return ''                                # not the user's plugin data dir
+    matches = [k for k in known if _slug(k) == os.path.basename(data)]
+    return matches[0] if len(matches) == 1 else ''
+
+
+def _id_from_cache(home, known):
+    """Plugin id from a cache-shaped CLAUDE_PLUGIN_ROOT, '' if unusable, None if not a cache path."""
+    raw = os.environ.get('CLAUDE_PLUGIN_ROOT')
+    if not raw:
+        return None
+    cache = os.path.join(home, 'plugins', 'cache')
+    try:
+        root, cache = os.path.realpath(raw), os.path.realpath(cache)
+    except (OSError, ValueError):
+        return ''
+    if root != cache and not root.startswith(cache + os.sep):
+        return None                               # in-place install; the data dir names it
+    parts = os.path.relpath(root, cache).split(os.sep)
+    if len(parts) != 3 or parts[1] != 'claim-check' or parts[0] in ('', '.', '..'):
+        return ''
+    plugin_id = 'claim-check@' + parts[0]
+    return plugin_id if plugin_id in known else ''
+
+
+def _select_plugin_id(known, home):
+    """Which install's options apply. '' means: don't guess, leave the hook on."""
+    data_id, root_id = _id_from_data(home, known), _id_from_cache(home, known)
+    if data_id is not None and root_id is not None and data_id != root_id:
+        return ''
+    if data_id is not None:
+        return data_id
+    if root_id is not None:
+        return root_id
+    if len(known) == 1:
+        return next(iter(known))                 # one install, and this process wasn't told which
+    return ''
+
+
+def plugin_options(project_dir=None):
+    """This install's plugin settings. Missing means the hook runs and blocks."""
+    try:
+        known, home = _saved_options(project_dir)
+        plugin_id = _select_plugin_id(known, home)
+        return known.get(plugin_id, {}) if plugin_id else {}
+    except Exception:
+        return {}
+
+
 def hook():
     try:
         payload = json.loads(read_stdin() or '{}')
@@ -312,8 +490,13 @@ def hook():
         return 0
     if not isinstance(payload, dict):
         return 0
-    if payload.get('stop_hook_active') or os.environ.get('CLAIM_CHECK_OFF'):
+    if payload.get('stop_hook_active'):
         return 0                                    # already blocked once; let it stop
+    # enabled / log_only come from the plugin's userConfig, in user or managed
+    # settings. Env vars and project files are not consulted: a repo can set those.
+    opts = plugin_options(payload.get('cwd'))
+    if opts.get('enabled') is False:
+        return 0
     path = payload.get('transcript_path')
     try:
         last, earlier = last_turn(path)
@@ -322,7 +505,7 @@ def hook():
         return 0
     if verdict:
         log_block(payload, *verdict)
-        if os.environ.get('CLAIM_CHECK_LOG_ONLY'):
+        if opts.get('log_only') is True:
             return 0                                # trial run: log what it would have blocked, let the turn end
         # additionalContext keeps Claude going, like decision "block", with the same loop protection
         # (stop_hook_active), but shows as "Stop hook feedback" instead of a hook error.

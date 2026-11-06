@@ -89,7 +89,23 @@ It reads your past sessions in `~/.claude/projects` and prints how many "done" a
 
 ## Audit it
 
-Every block is written to `~/.claude/claim-check/blocks.jsonl` (set `CLAIM_CHECK_LOG` to move it). Run `python3 claim_check.py report` in a clone of this repo to print the last ten. To try it without blocking anything, set `CLAIM_CHECK_LOG_ONLY` to any non-empty value: it logs what it would have blocked and lets every turn end, so you can read the log for a week before turning blocking on. To turn the hook off, set `CLAIM_CHECK_OFF` to any non-empty value (even `0`), in the shell that starts Claude Code or under `env` in `settings.json`. If it blocks something it shouldn't, [open an issue](https://github.com/Balance0014/claude-code-claim-check/issues) with the sentence it flagged and I'll fix the rule.
+Every block is written to `~/.claude/claim-check/blocks.jsonl` (set `CLAIM_CHECK_LOG` to move it). Run `python3 claim_check.py report` in a clone of this repo to print the last ten.
+
+To try it without blocking, set the plugin option `log_only` to `true`. It logs what it would have blocked and lets every turn end, so you can read the log for a week before turning blocking on. To turn the hook off, set `enabled` to `false`. In Claude Code those show up as "Log only" and "Check claims": open `/config` and find claim-check, or run `claude plugin configure claim-check`. The same values can be written by hand in your user settings:
+
+```json
+{
+  "pluginConfigs": {
+    "claim-check@claim-check": {
+      "options": { "enabled": false }
+    }
+  }
+}
+```
+
+The key is `claim-check@` plus the marketplace name (`claim-check` for this repo, `buildwithclaude` if you installed it from there). Claude Code stores this in your user settings, `~/.claude/settings.json`, or in `$CLAUDE_CONFIG_DIR/settings.json` if you moved that directory. It does not read the option from a project. A repository file, a shell profile, or a command the agent runs cannot turn the hook off. An organization can set the same option in managed settings, and that wins. If you added the script to `~/.claude/settings.json` yourself, delete that Stop hook to turn it off.
+
+If it blocks something it shouldn't, [open an issue](https://github.com/Balance0014/claude-code-claim-check/issues) with the sentence it flagged and I'll fix the rule.
 
 ## What it can't do
 
