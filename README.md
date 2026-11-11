@@ -6,6 +6,8 @@
 
 ![claim-check blocks an unproven "is fixed" in Claude Code; the agent then runs the tests and answers with the result](docs/demo.svg)
 
+This is a Claude Code Stop hook for anyone who has watched the agent say "it's fixed" or "tests pass" and later found out nothing had run. When the agent tries to end a turn after a claim like that, or after saying something doesn't exist, the hook looks at what actually happened in the session. If the proof isn't there, it sends the agent back once and says what's missing.
+
 The two agent replies that have cost me the most time are "it's fixed," when nothing had run since the last edit, and "that isn't used anywhere," after one search. Both sound final, so I moved on, and didn't find out they were wrong until something broke.
 
 On November 4, 2026, I replayed my own Claude Code history through the hook: 3,977 turns, after dropping 1,649 duplicates (resuming a session copies its earlier turns into a new file). Of those, 406 ended with a claim like "done," "fixed," "deployed" or "tests pass," and version 0.2.0 would have blocked 86. Most of the 86 weren't the case I built it for.
@@ -126,6 +128,23 @@ If it blocks something it shouldn't, [open an issue](https://github.com/Balance0
 - It tracks edits made with Claude Code's edit tools. A file changed by a shell command such as `sed -i` isn't seen as an edit, and the `sed` command itself counts as the check.
 - Claude Code writes the transcript asynchronously. If the last command hasn't been written when the hook runs, a claim that was checked can be blocked.
 - On Windows, if `python3` isn't on your PATH, change it to `python` in `hooks/hooks.json` or your settings.
+
+## FAQ
+
+**Does this work with Claude Code?**  
+Yes. Install it as a Claude Code plugin, or add `claim_check.py` as a Stop hook in `~/.claude/settings.json`. It needs Python 3.9+ and has no dependencies.
+
+**Can I use it with Codex or other agents?**  
+`npx skills add Balance0014/claude-code-claim-check` installs the rules as a skill, plus a checklist for what "fixed" means. The agent reads them, but nothing makes it follow them. There's no hook version for Codex in this release.
+
+**Will it get the agent stuck in a loop?**  
+No. It never blocks twice in a row, and if the hook itself crashes, it lets the turn end.
+
+**How do I try it without blocking turns?**  
+Set the plugin option `log_only` to `true`. It logs what it would have blocked and lets every turn end. To turn the hook off, set `enabled` to `false`.
+
+**Can I see how often it would have caught my own sessions?**  
+Yes. Clone the repo and run `python3 claim_check.py replay`. It reads past sessions in `~/.claude/projects` and prints how many claims it would have blocked. Nothing leaves your machine.
 
 ## Why I built it
 
