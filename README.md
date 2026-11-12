@@ -1,5 +1,7 @@
 # claim-check
 
+[![Sigistry](https://sigistry.com/badge/claim-check.svg)](https://sigistry.com/verification)
+
 **A Claude Code Stop hook that sends your coding agent back when it says "fixed" without showing proof.**
 
 [中文说明](README.zh-CN.md) · 0.5.0 · MIT · Python 3.9+, no dependencies
