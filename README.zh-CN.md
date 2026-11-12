@@ -2,7 +2,7 @@
 
 **一个 Claude Code 的 Stop 钩子：AI 说「修好了」却拿不出证据，就把它打回去。**
 
-[English](README.md) · 0.5.0 · MIT · Python 3.9+，不用装任何依赖
+[English](README.md) · 0.5.1 · MIT · Python 3.9+，不用装任何依赖
 
 ![claim-check 在 Claude Code 里拦下一句没有证据的「修好了」，AI 跑完测试后带着结果重新回答](docs/demo.svg)
 
@@ -97,7 +97,7 @@ python3 claim_check.py replay
 
 ## 查它有没有拦错
 
-每次拦截都记在 `~/.claude/claim-check/blocks.jsonl`（设 `CLAIM_CHECK_LOG` 可以换位置）。在克隆下来的仓库里运行 `python3 claim_check.py report`，会列出最近十条。
+每次拦截都记在 `~/.claude/claim-check/blocks.jsonl`，钩子只用这个路径。在克隆下来的仓库里运行 `python3 claim_check.py report`，会列出最近十条；要读别的文件，用 `python3 claim_check.py report --log <路径>`。
 
 想先试用、不真拦，把插件选项 `log_only` 设成 `true`。它只记下本来会拦哪些，每一轮都照常放行，你可以先看一周记录，再打开拦截。要关掉钩子，把 `enabled` 设成 `false`。在 Claude Code 里，这两项显示为 “Log only” 和 “Check claims”：打开 `/config`，找到 claim-check，或者运行 `claude plugin configure claim-check`。也可以直接写进你的用户设置：
 

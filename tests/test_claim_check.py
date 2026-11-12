@@ -2,6 +2,7 @@
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -475,15 +476,55 @@ class Hook(unittest.TestCase):
             log = os.path.join(d, 'blocks.jsonl')
             with open(log, 'w') as f:
                 f.write(json.dumps({'at': 't1', 'kind': 'absent', 'claim': 'not found', 'missing': 'x'}) + '\n{"at": "t2", "ki')
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                code = C.main(['claim_check.py', 'report', '--log', log])
+        self.assertEqual(code, 0)
+        self.assertIn('1 block since t1: 1 "not found"', buf.getvalue())
+        self.assertIn('Last block (check it for false positives):', buf.getvalue())
+
+    def test_report_without_log_still_reads_the_hook_log(self):
+        with tempfile.TemporaryDirectory() as d:
+            log = os.path.join(d, 'blocks.jsonl')
+            with open(log, 'w') as f:
+                f.write(json.dumps({'at': 't1', 'kind': 'done', 'claim': 'Fixed', 'missing': 'x'}) + '\n')
             old, C.LOG = C.LOG, log
             try:
                 buf = io.StringIO()
                 with redirect_stdout(buf):
-                    C.report()
+                    self.assertEqual(C.main(['claim_check.py', 'report']), 0)
             finally:
                 C.LOG = old
-        self.assertIn('1 block since t1: 1 "not found"', buf.getvalue())
-        self.assertIn('Last block (check it for false positives):', buf.getvalue())
+        self.assertIn('1 block since t1: 1 "done"', buf.getvalue())
+
+    def test_report_log_requires_a_path(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(C.main(['claim_check.py', 'report', '--log']), 2)
+        self.assertIn('--log', buf.getvalue())
+
+    def test_hook_log_ignores_claim_check_log(self):
+        home = tempfile.mkdtemp()
+        other = tempfile.mkdtemp()
+        config = tempfile.mkdtemp()
+        env_log = os.path.join(other, 'elsewhere.jsonl')
+        transcript = os.path.join(other, 't.jsonl')
+        with open(transcript, 'w') as f:
+            f.write('\n'.join(json.dumps(e) for e in turn(tool('Edit', file_path='a.py'), say('Fixed.'))) + '\n')
+        env = os.environ.copy()
+        env.update(HOME=home, USERPROFILE=home, CLAIM_CHECK_LOG=env_log, CLAUDE_CONFIG_DIR=config)
+        script = os.path.join(os.path.dirname(__file__), '..', 'claim_check.py')
+        proc = subprocess.run(
+            [sys.executable, script],
+            input=json.dumps({'transcript_path': transcript, 'session_id': 's', 'cwd': other}),
+            text=True, capture_output=True, env=env, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('claim-check:', proc.stdout)
+        fixed = os.path.join(home, '.claude', 'claim-check', 'blocks.jsonl')
+        self.assertTrue(os.path.isfile(fixed))
+        self.assertFalse(os.path.exists(env_log))
+        with open(fixed, encoding='utf-8') as f:
+            self.assertEqual(json.loads(f.readline())['kind'], 'done')
 
 
 class ConfigHome(unittest.TestCase):

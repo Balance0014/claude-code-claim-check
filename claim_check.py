@@ -25,7 +25,9 @@ Usage:
   claim_check.py check FILE.jsonl     Judge the last turn of a transcript, print the verdict
   claim_check.py replay [DIR]         Judge every turn in past transcripts (default
                                       ~/.claude/projects) and print how many claims came without proof
-  claim_check.py report               Summarize the block log
+  claim_check.py report [--log FILE]  Summarize the block log. The hook always writes
+                                      ~/.claude/claim-check/blocks.jsonl; --log only
+                                      chooses the file this command reads
 
 Standard library only. Python 3.9+.
 """
@@ -36,7 +38,8 @@ import re
 import sys
 from datetime import datetime, timezone
 
-LOG = os.environ.get('CLAIM_CHECK_LOG') or os.path.expanduser('~/.claude/claim-check/blocks.jsonl')
+# Not from the environment: a project env block can set variables, and this file is the audit log.
+LOG = os.path.expanduser('~/.claude/claim-check/blocks.jsonl')
 
 EDIT_TOOLS = {'Edit', 'MultiEdit', 'Write', 'NotebookEdit'}
 READ_TOOLS = {'Read', 'Grep', 'Glob', 'LS'}
@@ -786,20 +789,22 @@ def replay(root):
     return 0
 
 
-def report():
+def report(path=None):
+    """Summarize a block log. The hook always writes LOG; path is only for this command."""
+    path = path or LOG
     try:
         rows = []
-        with open(LOG, encoding='utf-8') as f:
+        with open(path, encoding='utf-8') as f:
             for l in f:
                 try:
                     rows.append(json.loads(l))
                 except ValueError:
                     pass                            # a line cut off mid-write
     except OSError:
-        print(f'No blocks logged yet ({LOG}).')
+        print(f'No blocks logged yet ({path}).')
         return 0
     if not rows:
-        print(f'No blocks logged yet ({LOG}).')
+        print(f'No blocks logged yet ({path}).')
         return 0
     label = {'done': '"done"', 'absent': '"not found"'}
     by = {}
@@ -815,13 +820,28 @@ def report():
     return 0
 
 
+def _report_path(args):
+    """The file `report` should read. (None, False) means the fixed hook log."""
+    if not args:
+        return None, False
+    if len(args) == 2 and args[0] == '--log' and args[1]:
+        return args[1], False
+    if len(args) == 1 and args[0].startswith('--log=') and args[0][6:]:
+        return args[0][6:], False
+    return None, True
+
+
 def main(argv):
     if len(argv) > 1 and argv[1] == 'check' and len(argv) > 2:
         return check(argv[2])
     if len(argv) > 1 and argv[1] == 'replay':
         return replay(argv[2] if len(argv) > 2 else os.path.expanduser('~/.claude/projects'))
     if len(argv) > 1 and argv[1] == 'report':
-        return report()
+        path, bad = _report_path(argv[2:])
+        if bad:
+            print(__doc__)
+            return 2
+        return report(path)
     if len(argv) > 1:
         print(__doc__)
         return 2

@@ -4,7 +4,7 @@
 
 **A Claude Code Stop hook that sends your coding agent back when it says "fixed" without showing proof.**
 
-[中文说明](README.zh-CN.md) · 0.5.0 · MIT · Python 3.9+, no dependencies
+[中文说明](README.zh-CN.md) · 0.5.1 · MIT · Python 3.9+, no dependencies
 
 ![claim-check blocks an unproven "is fixed" in Claude Code; the agent then runs the tests and answers with the result](docs/demo.svg)
 
@@ -102,7 +102,7 @@ It reads your past sessions in `~/.claude/projects` and prints how many "done" a
 
 ## Audit it
 
-Every block is written to `~/.claude/claim-check/blocks.jsonl` (set `CLAIM_CHECK_LOG` to move it). Run `python3 claim_check.py report` in a clone of this repo to print the last ten.
+Every block is written to `~/.claude/claim-check/blocks.jsonl`. The hook always uses that path. Run `python3 claim_check.py report` in a clone of this repo to print the last ten, or `python3 claim_check.py report --log <path>` to read a different file.
 
 To try it without blocking, set the plugin option `log_only` to `true`. It logs what it would have blocked and lets every turn end, so you can read the log for a week before turning blocking on. To turn the hook off, set `enabled` to `false`. In Claude Code those show up as "Log only" and "Check claims": open `/config` and find claim-check, or run `claude plugin configure claim-check`. The same values can be written by hand in your user settings:
 
