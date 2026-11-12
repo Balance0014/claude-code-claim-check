@@ -2,9 +2,16 @@
 
 **一个 Claude Code 的 Stop 钩子：AI 说「修好了」却拿不出证据，就把它打回去。**
 
-[English](README.md) · MIT · Python 3.9+，不用装任何依赖
+[English](README.md) · 0.5.0 · MIT · Python 3.9+，不用装任何依赖
 
 ![claim-check 在 Claude Code 里拦下一句没有证据的「修好了」，AI 跑完测试后带着结果重新回答](docs/demo.svg)
+
+在 Claude Code 里安装：
+
+```text
+/plugin marketplace add Balance0014/claude-code-claim-check
+/plugin install claim-check@claim-check
+```
 
 用 AI 写代码，最坑人的是两句话：一句是「修好了」，其实改完之后什么都没跑；另一句是「这个函数没人调用」，其实只搜了一次。两句听着都像板上钉钉，我就接着往下做，直到出了问题才发现不对。
 

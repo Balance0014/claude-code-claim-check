@@ -2,9 +2,16 @@
 
 **A Claude Code Stop hook that sends your coding agent back when it says "fixed" without showing proof.**
 
-[中文说明](README.zh-CN.md) · MIT · Python 3.9+, no dependencies
+[中文说明](README.zh-CN.md) · 0.5.0 · MIT · Python 3.9+, no dependencies
 
 ![claim-check blocks an unproven "is fixed" in Claude Code; the agent then runs the tests and answers with the result](docs/demo.svg)
+
+Install in Claude Code:
+
+```text
+/plugin marketplace add Balance0014/claude-code-claim-check
+/plugin install claim-check@claim-check
+```
 
 This is a Claude Code Stop hook for anyone who has watched the agent say "it's fixed" or "tests pass" and later found out nothing had run. When the agent tries to end a turn after a claim like that, or after saying something doesn't exist, the hook looks at what actually happened in the session. If the proof isn't there, it sends the agent back once and says what's missing.
 
