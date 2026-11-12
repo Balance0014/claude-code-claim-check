@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Sends your coding agent back when it says \"done\" or \"not found\" without showing proof.",
-    "version": "0.5.0"
+    "version": "0.5.1"
   },
   "plugins": [
     {

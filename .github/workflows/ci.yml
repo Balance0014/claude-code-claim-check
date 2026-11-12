@@ -32,6 +32,8 @@ jobs:
           out=$(echo "{\"transcript_path\":\"$RUNNER_TEMP/t.jsonl\"}" | CLAIM_CHECK_LOG="$RUNNER_TEMP/b.jsonl" python claim_check.py)
           echo "$out"
           echo "$out" | python -c 'import json,sys; assert "claim-check:" in json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"]'
+          test ! -e "$RUNNER_TEMP/b.jsonl"
+          test -s "$HOME/.claude/claim-check/blocks.jsonl"
           echo '{"transcript_path":"'"$RUNNER_TEMP"'/t.jsonl","stop_hook_active":true}' | python claim_check.py | grep -c . | grep -qx 0
       - name: Plugin files are valid JSON
         run: |

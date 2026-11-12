@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1 · 2026-11-12
+
+- The hook always appends blocks to `~/.claude/claim-check/blocks.jsonl`. It no longer reads `CLAIM_CHECK_LOG`, so a project env block cannot redirect the audit log. `report --log <path>` reads a different file.
+
 ## 0.5.0 · 2026-11-06
 
 - A "not found" claim needs two different kinds of lookup. Searching the same way twice no longer counts, even in another folder or with different flags. A different pattern, a different file, or a different tool does. Reading a file and `cat` on that same file count as one. Suggested in a Reddit comment.
