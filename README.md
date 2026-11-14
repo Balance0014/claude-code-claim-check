@@ -2,11 +2,25 @@
 
 [![Sigistry](https://sigistry.com/badge/claim-check.svg)](https://sigistry.com/verification)
 
-**A Claude Code Stop hook that sends your coding agent back when it says "fixed" without showing proof.**
+Claude Code says "done" or "fixed" when it didn't verify the change. claim-check catches that claim before you trust it.
 
 [中文说明](README.zh-CN.md) · 0.5.1 · MIT · Python 3.9+, no dependencies
 
-![claim-check blocks an unproven "is fixed" in Claude Code; the agent then runs the tests and answers with the result](docs/demo.svg)
+The agent edits `src/auth/redirect.ts`. Nothing runs after that edit, and it still says:
+
+```text
+The redirect loop is fixed.
+```
+
+claim-check sends the turn back once:
+
+```text
+claim-check: you wrote "is fixed", but nothing ran successfully after the last edit.
+Run the check that proves it (the tests, the script, a request to the live URL) and
+show the result, or say plainly that it isn't verified yet.
+```
+
+If this saved you a bad merge, a star helps others find it.
 
 Install in Claude Code:
 
@@ -15,29 +29,32 @@ Install in Claude Code:
 /plugin install claim-check@claim-check
 ```
 
+Then run `/reload-plugins` if Claude Code asks, or start a new session.
+
+## Measured on my own sessions
+
+On November 4, 2026, I replayed my own Claude Code history through the hook: 3,977 turns, after dropping 1,649 duplicates (resuming a session copies its earlier turns into a new file). Of those, 406 ended with a claim like "done," "fixed," "deployed" or "tests pass," and version 0.2.0 would have blocked 86.
+
+77 of the 86 had no tool calls at all. In 76 of the 77, something had run successfully after the last edit, just in an earlier turn. I hand-checked 24 of the 86. Eighteen were wrap-ups that claimed finished work without citing a commit, test output or status code.
+
+After I posted it, a commenter argued that the 77 matter most, because a hook that blocks a correct wrap-up gets turned off. So 0.3.0 counts a check from an earlier turn, as long as no code was edited after it. Of the same 406 claims, it blocks 2. The cost is that a wrap-up no longer has to show its proof.
+
+How those 86 split, the rest of that hand check, and 17 "not found" turns are in [The replay](#the-replay).
+
+## What counts as verification
+
+- **In the hook.** A check from before the last code edit doesn't count. claim-check looks for a shell command, MCP tool, URL fetch or subagent that ran after that edit and didn't fail, in this turn or an earlier one. Reading the file again doesn't count, and neither does a look-only command (`cat`, `grep`, `git diff`, and the rest of the list below). Saying it isn't verified yet always passes.
+- **Planned.** Exit codes of test and build commands. Today any command that isn't on the look-only list counts, as long as it didn't fail, and the hook doesn't read the exit code. The words "exit code 0" in the reply count as cited proof only when that turn edited no code.
+- **Planned.** Regression tests that fail before the change and pass after.
+- **Planned.** Tests that load the changed file. The hook can see that a command ran after the edit. It can't see whether that command loaded the file.
+
+![claim-check blocks an unproven "is fixed" in Claude Code; the agent then runs the tests and answers with the result](docs/demo.svg)
+
+## How it works
+
 This is a Claude Code Stop hook for anyone who has watched the agent say "it's fixed" or "tests pass" and later found out nothing had run. When the agent tries to end a turn after a claim like that, or after saying something doesn't exist, the hook looks at what actually happened in the session. If the proof isn't there, it sends the agent back once and says what's missing.
 
 The two agent replies that have cost me the most time are "it's fixed," when nothing had run since the last edit, and "that isn't used anywhere," after one search. Both sound final, so I moved on, and didn't find out they were wrong until something broke.
-
-On November 4, 2026, I replayed my own Claude Code history through the hook: 3,977 turns, after dropping 1,649 duplicates (resuming a session copies its earlier turns into a new file). Of those, 406 ended with a claim like "done," "fixed," "deployed" or "tests pass," and version 0.2.0 would have blocked 86. Most of the 86 weren't the case I built it for.
-
-- 77 had no tool calls at all. Usually that's a wrap-up saying something was fixed or deployed, with no commit, test result or status code in it. The proof may be in an earlier turn, but the wrap-up is what I read, and it doesn't show any.
-- 8 had tool calls, but only reads, searches, read-only commands, to-do updates or failed commands.
-- 1 made the claim after a code edit with nothing run successfully since. That's the case I built the hook for. It's probably rare here because an older version was already catching it on my machine. Your count may be higher.
-
-I hand-checked 24 of the 86: 20 drawn at random when the count was still 82, plus the 4 that later rule changes added. Eighteen were wrap-ups that claimed finished work without citing a commit, test output or status code. Three weren't claims of finished work: a research finding (a change had been tested and made the model worse), a condition (the work would count as done once merged) and a plan for work that hadn't started. The other three could be read either way.
-
-After I posted it, a commenter argued that the 77 matter most, because a hook that blocks a correct wrap-up gets turned off. They had a point: in 76 of the 77, something had run successfully after the last edit, just in an earlier turn. So 0.3.0 counts a check from an earlier turn, as long as no code was edited after it. Of the same 406 claims, it blocks 2: the 1 above, and 1 wrap-up with nothing run since the last edit. The cost is that a wrap-up no longer has to show its proof, so the wrap-ups from my hand check get through now too.
-
-Separately, 17 turns ended by saying something wasn't there, and in 2 of them the agent had looked once or not at all.
-
-When the agent tries to end its turn, the hook compares what the agent claimed with what it actually did. If the proof isn't there, it sends the agent back once and says what's missing.
-
-```text
-claim-check: you wrote "is fixed", but nothing ran successfully after the last edit.
-Run the check that proves it (the tests, the script, a request to the live URL) and
-show the result, or say plainly that it isn't verified yet.
-```
 
 ## What it checks
 
@@ -66,6 +83,20 @@ The second lookup has to be a different kind. Searching for the same text again 
 **Cancelled:** a "done" claim with a negation earlier in its clause ("hasn't been deployed"), or in a clause or sentence that opens with a condition word: if, once, when, after, before, until, unless, make sure or in case ("once tests pass, tag it"). A condition inside a noun phrase doesn't cancel it: "the crash when saving is fixed" is still a claim. A "not found" claim is cancelled by any of those words except "after", anywhere before it in the clause ("If the config file doesn't exist, the script creates it").
 
 It never blocks twice in a row, so the agent can't get stuck, and if the hook itself crashes, it lets the turn end.
+
+## The replay
+
+On November 4, 2026, I replayed my own Claude Code history through the hook: 3,977 turns, after dropping 1,649 duplicates (resuming a session copies its earlier turns into a new file). Of those, 406 ended with a claim like "done," "fixed," "deployed" or "tests pass," and version 0.2.0 would have blocked 86. Most of the 86 weren't the case I built it for.
+
+- 77 had no tool calls at all. Usually that's a wrap-up saying something was fixed or deployed, with no commit, test result or status code in it. The proof may be in an earlier turn, but the wrap-up is what I read, and it doesn't show any.
+- 8 had tool calls, but only reads, searches, read-only commands, to-do updates or failed commands.
+- 1 made the claim after a code edit with nothing run successfully since. That's the case I built the hook for. It's probably rare here because an older version was already catching it on my machine. Your count may be higher.
+
+I hand-checked 24 of the 86: 20 drawn at random when the count was still 82, plus the 4 that later rule changes added. Eighteen were wrap-ups that claimed finished work without citing a commit, test output or status code. Three weren't claims of finished work: a research finding (a change had been tested and made the model worse), a condition (the work would count as done once merged) and a plan for work that hadn't started. The other three could be read either way.
+
+After I posted it, a commenter argued that the 77 matter most, because a hook that blocks a correct wrap-up gets turned off. They had a point: in 76 of the 77, something had run successfully after the last edit, just in an earlier turn. So 0.3.0 counts a check from an earlier turn, as long as no code was edited after it. Of the same 406 claims, it blocks 2: the 1 above, and 1 wrap-up with nothing run since the last edit. The cost is that a wrap-up no longer has to show its proof, so the wrap-ups from my hand check get through now too.
+
+Separately, 17 turns ended by saying something wasn't there, and in 2 of them the agent had looked once or not at all.
 
 ## Install
 
