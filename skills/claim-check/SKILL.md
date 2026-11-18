@@ -10,10 +10,16 @@ Two kinds of sentence cause most of the damage when they are wrong: "it's fixed"
 ## Before you say it's done, fixed, deployed or passing
 
 1. After your last code or config edit, run the thing that proves it: the tests, the build, the command, a request to the live URL.
-2. Put the result in your answer: how many tests passed, the status code, the commit, the exit code.
-3. If you edited again after that run, run it again. A check from before the last edit proves nothing about the code now.
-4. Re-reading the file you just edited is not a check.
-5. If you can't run the check, say so: "changed, not verified yet". That's an acceptable answer.
+2. Read how it ended, not just that it ran. A non-zero exit, a timeout, a denied command, "0 tests ran", a failure line in the output (even after `| tail`), or a run still going in the background means it did not pass.
+3. Put the result in your answer: how many tests passed, the status code, the commit, the exit code. If something still fails, say what.
+4. If you edited again after that run, run it again. A check from before the last edit proves nothing about the code now. That includes edits made with `sed -i` or a heredoc.
+5. Re-reading the file you just edited is not a check.
+6. If you can't run the check, say so: "changed, not verified yet". That's an acceptable answer.
+
+## Before you say a bug is fixed
+
+1. Show the same test failing before the fix and passing after. If you only have the passing run, say so.
+2. Run the tests that load the code you changed, not an unrelated file that happens to be green. If you can't tell whether they reach the change, say that.
 
 ## Before you say something doesn't exist or isn't used
 
@@ -33,4 +39,4 @@ A workaround that stops the symptom is fine. Call it a workaround, not a fix.
 
 ## If a hook blocked you
 
-The claim-check hook found a claim without proof. Run the check and show the result, cite proof you already have (a commit hash, a line like "14 passed" or "HTTP 200") if you changed no code this turn, or rewrite the sentence as "not verified yet". Do one of these before you stop again.
+The claim-check hook found a claim without proof. If the last test or build failed, make it pass or say what still fails. Otherwise run the check and show the result, cite proof you already have (a commit hash, a line like "14 passed" or "HTTP 200") if you changed no code this turn, or rewrite the sentence as "not verified yet". Do one of these before you stop again.

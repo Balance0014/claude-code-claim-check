@@ -6,9 +6,12 @@ session transcript, looks at what the agent claimed in its final message, and ch
 the agent actually did:
 
   * "fixed / deployed / tests pass / done" needs something that ran after the last code
-    edit and did not fail: a shell command, an MCP tool, a URL fetch or a subagent. Reading
-    the file you just edited is not proof. In a turn with no edits, a run in an earlier turn
-    counts if no code was edited after it; failing that, the reply can cite proof instead.
+    edit and finished without failing: a shell command, an MCP tool, a URL fetch or a
+    subagent. It can be in any earlier turn of the session, as long as no code was edited
+    after it. Reading the file you just edited is not proof. A command that exited non-zero,
+    timed out, was denied, was still running in the background, or ran zero tests is not
+    proof either. If the last test or build after the edit failed, a later unrelated command
+    doesn't make up for it. With no edits and nothing run, the reply can cite proof instead.
   * "doesn't exist / not found / nothing calls it" needs at least two lookups, and the
     second has to be a different kind of search. The same pattern again, in another
     folder or with different flags, is still one.
@@ -16,9 +19,16 @@ the agent actually did:
 Missing proof: it blocks once, says exactly what is missing, and the agent either runs
 the check or says plainly that it has not verified. Saying "not verified" always passes.
 It never blocks twice in a row and never blocks because of its own errors. Every block
-is appended to a log so you can audit false positives. Turn it off with the plugin's
-own `enabled` setting, in your user settings. There is no environment variable for
-that, and a project settings file is not read.
+is appended to a log so you can audit false positives.
+
+Some things are worth a look but are not proof of a false claim, so they never block:
+tests that passed after a fix without ever failing before it, tests pointed at files
+that never mention the changed file, a check run in a different project from the edits,
+a build output run without a rebuild, a coverage report showing the changed file at 0%.
+Those are shown to you (not to the agent) as a one-line note.
+
+Turn it off with the plugin's own `enabled` setting, in your user settings. There is no
+environment variable for that, and a project settings file is not read.
 
 Usage:
   claim_check.py                      Stop hook mode (reads the hook payload on stdin)
@@ -36,6 +46,7 @@ import json
 import os
 import re
 import sys
+import time
 from datetime import datetime, timezone
 
 # Not from the environment: a project env block can set variables, and this file is the audit log.
@@ -45,7 +56,11 @@ EDIT_TOOLS = {'Edit', 'MultiEdit', 'Write', 'NotebookEdit'}
 READ_TOOLS = {'Read', 'Grep', 'Glob', 'LS'}
 # What can prove a claim: running something. Shell commands, MCP tools (browsers, APIs), fetching a URL, a subagent.
 # Bookkeeping such as TodoWrite proves nothing.
-RUN_TOOLS = {'Bash', 'BashOutput', 'PowerShell', 'WebFetch', 'Agent', 'Task'}
+RUN_TOOLS = {'Bash', 'PowerShell', 'WebFetch', 'Agent', 'Task'}
+SHELL_TOOLS = {'Bash', 'PowerShell'}
+# Reading a background command's output, or stopping it, is not a new run: it settles the run that started it.
+POLL_TOOLS = {'BashOutput', 'TaskOutput'}
+STOP_TOOLS = {'KillShell', 'KillBash', 'TaskStop'}
 # What counts as looking something up: reading, searching, or running a command.
 LOOKUP_TOOLS = READ_TOOLS | RUN_TOOLS | {'WebSearch', 'NotebookRead'}
 
@@ -210,15 +225,393 @@ def parse(turn):
     return actions, errors, strip_quoted(raw), raw
 
 
-def ran_after_edit(turn, state=False):
-    """Carry "something ran successfully after the last code edit" through one more turn."""
-    actions, errors = parse(turn)[:2]
-    for i, n, _ in actions:
-        if n in EDIT_TOOLS:
-            state = False
-        elif i not in errors and runs(n):
-            state = True
-    return state
+# ---------------------------------------------------------------------------
+# The session's timeline: what was edited, what ran, and how each run ended.
+#
+# Claude Code's transcript format is internal and changes between versions. Everything below reads
+# what is there and falls back to the plain is_error flag when a field is missing.
+
+# Tests and builds are checks whose result can be read from their own summary line, not only the exit code.
+# Each pattern is matched at the start of one step of a command (after `cd …;`, `X=1`, `npx`, `uv run`),
+# so `git add test_x.py` or a heredoc that mentions pytest is not a test run.
+TEST_CMD = re.compile(r"""(?ix)^(?:
+    (?:\S*/)?(?:pytest|py\.test|tox|nox|nosetests|jest|vitest|mocha|ava|karma|rspec|phpunit|ctest|bats)(?![\w-])
+  | python\d?(?:\.\d+)?\s+(?:-\S+\s+)*-m\s+(?:pytest|unittest|nose2?|tox)\b
+  | python\d?(?:\.\d+)?\s+(?:-\S+\s+)*(?:\S*/)?(?:test_[\w-]*|[\w-]*_test|tests?|run_?tests?)\.py\b
+  | (?:node|bun|tsx|ts-node|deno\s+run|bash|sh|zsh)\s+(?:-\S+\s+)*(?:\S*/)?(?:test_[\w-]*|[\w-]*[_-]test|tests?|run_?tests?|[\w-]+\.(?:test|spec))\.(?:[cm]?[jt]sx?|sh)\b
+  | (?:\./)?(?:\S*/)?(?:run_?tests?|tests?)\.sh\b
+  | (?:go|cargo|swift|dotnet|mix|deno|bun|flutter|dart|zig)\s+test\b
+  | node\s+--test\b
+  | (?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test(?::[\w:-]+)?(?![\w-])
+  | (?:playwright\s+test|cypress\s+run)\b
+  | (?:\./)?(?:mvnw?|gradlew?)\b.*\b(?:test|check|verify)\b
+  | make\s+(?:-\S+\s+)*(?:test|tests|check)\b
+)""")
+BUILD_CMD = re.compile(r"""(?ix)^(?:
+    (?:\S*/)?(?:tsc|webpack|esbuild|rollup|xcodebuild|msbuild|ninja|mypy|pyright|flake8|eslint|pylint|swiftc|javac|rustc)(?![\w-])
+  | (?:vite|next|nuxt|astro|turbo)\s+build\b | ruff\s+check\b
+  | (?:go|cargo|swift|dotnet|bazel)\s+(?:build|check|vet)\b
+  | (?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:build|typecheck|type-check|lint|compile|check)(?![\w:-])
+  | (?:\./)?(?:mvnw?|gradlew?)\b.*\b(?:compile|package|build|assemble)\b
+  | make(?:\s+-\S+)*(?:\s+(?:all|build|compile|lint))?\s*$
+  | python\d?(?:\.\d+)?\s+(?:-\S+\s+)*-m\s+(?:py_compile|compileall|mypy|ruff|flake8|pylint)\b | node\s+--check\b | bash\s+-n\b
+)""")
+WATCH = re.compile(r'--watch(?:All)?\b|(?<![\w-])-w(?![\w-])')          # a watcher never finishes; not a check
+_WRAP = re.compile(r'^(?:[A-Za-z_]\w*=\S*\s+|(?:env|time|nice|sudo|exec|command|npx|bunx|pnpx|xvfb-run)\s+|timeout\s+\S+\s+'
+                   r'|(?:uv|poetry|pipenv|pdm|hatch)\s+run\s+|(?:then|do|else)\s+)+')
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?\n\s*\2\s*(?=\n|$)", re.S)
+
+
+def _steps(command):
+    """The steps of a shell command (split at ; && || and newlines), each as its first piped program.
+    Heredoc bodies and quoted strings are blanked first: they are data, not commands."""
+    masked = re.sub(r"'[^']*'|\"[^\"]*\"", "''", HEREDOC.sub('<<EOF', command or ''))
+    out = []
+    for seg in re.split(r'&&|\|\||[;\n]', masked):
+        first = _WRAP.sub('', seg.split('|')[0].strip())
+        if first:
+            out.append(first)
+    return out
+
+
+def _step_kind(step):
+    if WATCH.search(step):
+        return 'other'
+    if TEST_CMD.match(step):
+        return 'test'
+    if BUILD_CMD.match(step):
+        return 'build'
+    return 'other'
+
+
+def check_kind(command):
+    """'test', 'build' or 'other', from the command line."""
+    kinds = {_step_kind(s) for s in _steps(command)}
+    return 'test' if 'test' in kinds else 'build' if 'build' in kinds else 'other'
+
+
+def _ends_with_check(command):
+    """The command's exit code is the check's own: the test or build is its last step."""
+    steps = _steps(command)
+    return bool(steps) and _step_kind(steps[-1]) != 'other'
+
+
+# A command that writes files. Claude Code's record of files changed during a command can also catch
+# another session or a `git pull` changing them, so a change counts as this agent's edit only if the
+# command itself writes, doesn't sync with git, and the file is source code: scripts write ledgers,
+# caches and state files (JSON, YAML, text) all the time.
+WRITES = re.compile(r"""(?x)\bsed\s+(?:-\S+\s+)*-i|\bperl\s+-\w*i|(?<![0-9&>])>>?\s*(?!/dev/null|&)[\w./~"'$-]|\btee\s
+    |(?:^|[\s;&|(])(?:cp|mv|install|ln)\s|\bpatch\s|\bgit\s+apply\b|\bwrite_(?:text|bytes)\(|\.write\(
+    |open\([^)\n]*['"][wax]\+?b?['"]|json\.dump\(|writeFileSync|fs\.(?:promises\.)?writeFile""")
+GIT_SYNC = re.compile(r'\bgit\s+(?:-C\s+\S+\s+)?(?:pull|merge|rebase|checkout|switch|reset|restore|stash|cherry-pick|revert|clone|am|worktree|submodule)\b')
+SOURCE = re.compile(r'\.(?:py|pyi|js|mjs|cjs|jsx|ts|tsx|mts|cts|go|rs|java|kt|kts|scala|swift|m|mm|c|cc|cpp|cxx|h|hpp|cs|rb|php|pl|lua|r|dart'
+                    r'|ex|exs|erl|hs|clj|sh|bash|zsh|ps1|sql|html?|css|scss|sass|less|vue|svelte|astro)$', re.I)
+
+
+EXIT = re.compile(r'^(?:Error:\s*)?Exit code (-?\d+)')
+# The command never really ran: denied, rejected, interrupted, or the runner itself was missing.
+NOT_RUN = re.compile(r"Permission (?:for|to) .{0,300}?denied|doesn't want to proceed|User rejected|^\s*<tool_use_error>|"
+                     r"\[Request interrupted|is temporarily unavailable|command not found|"
+                     r"is not recognized as an internal or external command|No module named \S*(?:pytest|unittest)|"
+                     r"no test specified|Missing script", re.I)
+# Said in the command itself: this run is supposed to fail (a mutation test, the bug reproduced on the old code).
+EXPECT_FAIL = re.compile(r'expect(?:ed|s)?\s+(?:it\s+|them\s+)?(?:to\s+)?fail|should\s+fail|must\s+fail|on\s+purpose|deliberately'
+                         r'|\bmutant|mutation|必红|应该?红|预期(?:失败|红)|故意|应该?失败', re.I)
+TIMED_OUT = re.compile(r'timed out|did not complete within', re.I)
+BACKGROUND = re.compile(r'running in background with ID:\s*(\w+)|^\s*Async agent launched|moved to the background', re.I)
+# What a test or build prints when it failed, even if a pipe (`| tail`) or `|| true` turned the exit code into 0.
+OUT_FAIL = re.compile(r'''(?imx)
+    ^=+\s.*\b[1-9]\d*\s+(?:failed|errors?)\b                 # pytest summary bar
+  | ^\s*[1-9]\d*\s+failed\b.*\bin\s+[\d.]+m?s\b                # pytest -q
+  | ^(?:FAILED|ERROR)\s+\S+::                                  # pytest short summary
+  | ^FAILED\s+\((?:failures|errors)=                           # unittest
+  | ^Tests?:\s+.*\b[1-9]\d*\s+failed\b | ^Test\s+Suites:\s+.*\b[1-9]\d*\s+failed\b     # jest
+  | ^\s*Tests?\s+[1-9]\d*\s+failed\b                           # vitest
+  | ^\s*[1-9]\d*\s+failing\b                                   # mocha
+  | ^---\s+FAIL:|^FAIL\s+\S                                    # go, jest
+  | ^test\s+result:\s+FAILED                                   # cargo
+  | ^not\s+ok\s+\d+|^\#\s+fail\s+[1-9]                         # TAP: node --test, bats
+  | ^error\[E\d+\]: | ^error:\s+(?:could\s+not\s+compile|aborting\s+due\s+to|linking\s+with)    # cargo, rustc
+  | \berror\s+TS\d+: | ^\S+:\d+:\d+:\s+(?:fatal\s+)?error: | ^Found\s+[1-9]\d*\s+errors?\b
+  | ^npm\s+ERR!|^npm\s+error\s|\bELIFECYCLE\b|^error\s+Command\s+failed
+  | ^make(?:\[\d+\])?:\s+\*\*\*.*\bError\s+\d+
+  | ^BUILD\s+FAILED|^\[ERROR\]\s+BUILD\s+FAILURE|^FAILURE:\s+Build\s+failed|^\*\*\s+(?:BUILD|TEST)\s+FAILED\s+\*\*
+''')
+# "3 failed" counts; "run 43 fail 0" (a label, then its number) doesn't.
+FAIL_COUNT = re.compile(r'\b[1-9]\d*\s+(?:tests?\s+)?(?:fail(?:s|ed|ing|ures?)?|errors?)\b(?!\s*[:=]?\s*\d)'
+                        r'|[1-9]\d*\s*(?:条|项|个)\s*(?:测试)?\s*失败', re.I)
+NO_TESTS = re.compile(r'(?im)\bcollected 0 items\b|\bno tests ran\b|^Ran 0 tests?\b|^NO TESTS RAN\b|\bNo tests found\b|^\s*0 passing\b'
+                      r'|^running 0 tests\b|\bno tests to run\b|\bno test files\b|^#\s+tests\s+0\b')
+SOME_TESTS = re.compile(r'(?im)\b[1-9]\d*\s+(?:tests?\s+)?(?:passed|passing)\b|^Ran\s+[1-9]\d*\s+tests?\b|^ok\s+\S+\s+[\d.]+s'
+                        r'|^test result: ok\. [1-9]|^#\s+pass\s+[1-9]|(?:^|:\s*)OK(?:\s+\(\w+=\d+\))?\s*$')
+TRACEBACK = re.compile(r'Traceback \(most recent call last\):')
+TRACEBACK_END = re.compile(r'^\w+(?:\.\w+)*(?:Error|Exception)\b')
+
+
+def _result_text(item):
+    c = item.get('content')
+    if isinstance(c, list):
+        return '\n'.join(str(i.get('text', '')) for i in c if isinstance(i, dict))
+    return c if isinstance(c, str) else ''
+
+
+def _short(text, n=70):
+    text = re.sub(r'\s+', ' ', str(text or '')).strip()
+    return text if len(text) <= n else text[:n - 1] + '…'
+
+
+def _summary(kind, text):
+    """'fail' or 'pass' from the last summary line a test runner or build printed, or None.
+    The last one decides: a command can run the old code (red) and then the new code (green)."""
+    found = None
+    for line in (text or '').rstrip().split('\n')[-80:]:
+        if OUT_FAIL.search(line) or (kind == 'test' and FAIL_COUNT.search(line)):
+            found = ('fail', line)
+        elif SOME_TESTS.search(line):
+            found = ('pass', line)
+    return found
+
+
+def read_output(kind, text):
+    """(state, why) for a command that exited 0, from what it printed: 'pass', 'fail' or 'empty' (ran no tests)."""
+    lines = (text or '').rstrip().split('\n')
+    tail = '\n'.join(lines[-80:])
+    if kind != 'other':
+        found = _summary(kind, text)
+        if found and found[0] == 'fail':
+            return 'fail', 'printed a failure (' + _short(found[1], 60) + ')'
+        if kind == 'test' and not found and NO_TESTS.search(tail) and not SOME_TESTS.search(text):
+            return 'empty', 'ran no tests'
+        if found:
+            return 'pass', ''
+    last = lines[-1].strip() if lines else ''
+    if TRACEBACK.search(tail) and TRACEBACK_END.match(last):
+        return 'fail', 'ended with a Python traceback (' + _short(last, 50) + ')'
+    return 'pass', ''
+
+
+def _failed(text):
+    """(state, why) for a tool result marked as an error."""
+    head = (text or '').strip()[:400]
+    m = EXIT.match(head)
+    if TIMED_OUT.search(head) and not m:
+        return 'timeout', 'timed out'
+    if NOT_RUN.search(head) or (m and m.group(1) in ('126', '127')):
+        return 'not_run', 'did not run (' + _short(re.sub(r'^(?:Error:\s*)?Exit code \d+\s*', '', head), 50) + ')'
+    if m:
+        return 'fail', 'exited with code ' + m.group(1)
+    return 'fail', 'returned an error'
+
+
+def _tag(block, name):
+    m = re.search(r'<%s>(.*?)</%s>' % (name, name), block, re.S)
+    return m.group(1).strip() if m else ''
+
+
+def _read_tail(path, size=262144):
+    try:
+        with open(path, 'rb') as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - size))
+            return f.read().decode('utf-8', 'replace')
+    except (OSError, ValueError):
+        return None
+
+
+def is_code(path):
+    """An edit that can change what the code does. Docs and notes don't."""
+    return bool(path) and not DOC_FILE.search(str(path))
+
+
+class Evidence:
+    """Everything the session did, in order: edits, and runs with how each one ended.
+
+    Built from the whole transcript, so a check from an earlier turn is seen. Each event is a dict:
+    k: 'edit' | 'run' | 'look'; turn; id; name; cwd; for edits paths, code, ok; for runs cmd, kind,
+    state ('open' = no result yet, 'pass', 'fail', 'timeout', 'not_run', 'pending', 'empty') and why.
+    """
+
+    def __init__(self, seeded=False):
+        self.events, self.by_id, self.tasks, self.waiting = [], {}, {}, {}
+        self.turn = 0
+        if seeded:              # judge(..., earlier=True): a check passed in an earlier turn
+            self.events.append({'k': 'run', 'turn': -1, 'id': None, 'name': 'earlier', 'cwd': None, 'cmd': '',
+                                'kind': 'other', 'state': 'pass', 'why': '', 'out': ''})
+
+    def next_turn(self):
+        self.turn += 1
+
+    def feed_turn(self, turn):
+        self.next_turn()
+        for e in turn or []:
+            self.feed(e)
+
+    def feed(self, entry):
+        c = (entry.get('message') or {}).get('content')
+        if entry.get('type') == 'assistant' and isinstance(c, list):
+            for i in c:
+                if isinstance(i, dict) and i.get('type') == 'tool_use':
+                    self._use(i, entry)
+        elif entry.get('type') == 'user':
+            if isinstance(c, str):
+                self._notice(c)
+            elif isinstance(c, list):
+                results = [i for i in c if isinstance(i, dict) and i.get('type') == 'tool_result']
+                extra = entry.get('toolUseResult') if len(results) == 1 else None
+                for i in c:
+                    if not isinstance(i, dict):
+                        continue
+                    if i.get('type') == 'tool_result':
+                        self._result(i, extra if isinstance(extra, dict) else {})
+                    elif i.get('type') == 'text':
+                        self._notice(i.get('text', ''))
+
+    def _use(self, item, entry):
+        name = item.get('name') or ''
+        inp = item.get('input') if isinstance(item.get('input'), dict) else {}
+        uid = item.get('id')
+        base = {'turn': self.turn, 'id': uid, 'name': name, 'cwd': entry.get('cwd')}
+        task = str(inp.get('task_id') or inp.get('bash_id') or inp.get('shell_id') or '')
+        if name in POLL_TOOLS or name in STOP_TOOLS:
+            self.waiting[uid] = ('poll' if name in POLL_TOOLS else 'stop', task)
+            return
+        if name in EDIT_TOOLS:
+            path = str(inp.get('file_path') or inp.get('notebook_path') or '')
+            ev = dict(base, k='edit', paths=[path], code=is_code(path), ok=None)
+        elif runs(name):
+            cmd = str(inp.get('command') or '') if name in SHELL_TOOLS else ''
+            look = name == 'Bash' and read_only(cmd)       # kept only to notice a file it wrote (cat > f)
+            ev = dict(base, k='look' if look else 'run', cmd=cmd, kind=check_kind(cmd), state='open', why='', out='')
+        else:
+            return
+        self.events.append(ev)
+        if uid:
+            self.by_id[uid] = ev
+
+    def _result(self, item, extra):
+        uid = item.get('tool_use_id')
+        err = bool(item.get('is_error'))
+        text = _result_text(item)
+        if uid in self.waiting:
+            what, task = self.waiting.pop(uid)
+            self._task_result(task, text, what, err)
+            return
+        ev = self.by_id.get(uid)
+        if ev is None or ev.get('settled'):
+            return
+        ev['settled'] = True
+        if ev['k'] == 'edit':
+            ev['ok'] = not err                         # a failed or rejected edit changed nothing
+            return
+        if err:
+            if ev['k'] == 'run':
+                ev['state'], ev['why'] = _failed(text)
+                # `pytest; git push` exits with git's code. It's the test's failure only if the test is the
+                # last step or its own summary says so; otherwise it's just a failed command.
+                if ev['kind'] != 'other':
+                    found = _summary(ev['kind'], text)
+                    if EXPECT_FAIL.search(ev['cmd']):
+                        ev['expected'] = True          # meant to go red (a mutation test, the old code): still a red run
+                    elif found and found[0] == 'fail':
+                        ev['why'] = '%s; printed %s' % (ev['why'], _short(found[1], 50))
+                    elif found or not _ends_with_check(ev['cmd']):
+                        ev['kind'] = 'other'           # the tests passed; another step failed
+                    ev['out'] = text[-20000:]
+            return
+        # Claude Code records the files a shell command changed (sed -i, a heredoc, git checkout).
+        diff = extra.get('bashEditDiff')
+        if (ev['name'] == 'Bash' and isinstance(diff, dict) and (ev['k'] == 'look' or ev['kind'] == 'other')
+                and WRITES.search(ev['cmd']) and not GIT_SYNC.search(ev['cmd'])):
+            paths = [str(f.get('filePath')) for f in diff.get('files') or [] if isinstance(f, dict) and f.get('filePath')]
+            source = [p for p in paths if SOURCE.search(p)]
+            if source:
+                ev.update(k='edit', paths=source, code=True, ok=True, via='shell')
+                return
+        if ev['k'] != 'run':
+            return
+        m = BACKGROUND.search(text[:400])
+        task = extra.get('backgroundTaskId') or (m.group(1) if m and m.group(1) else None)
+        if not task and m:
+            a = re.search(r'agentId:\s*(\w+)', text)
+            task = a.group(1) if a else None
+        if m or extra.get('backgroundTaskId'):
+            timed = extra.get('timedOutAfterMs') or TIMED_OUT.search(text[:400])
+            ev['state'] = 'pending'
+            ev['why'] = 'timed out and was moved to the background' if timed else 'was still running in the background'
+            if task:
+                self.tasks[str(task)] = ev
+            return
+        ev['state'], ev['why'] = read_output(ev['kind'], text)
+        if ev['state'] != 'pass' and ev['kind'] != 'other' and EXPECT_FAIL.search(ev['cmd']):
+            ev['expected'] = True
+        if ev['kind'] != 'other':
+            ev['out'] = text[-20000:]
+
+    def _settle(self, ev, status, code, output, summary=''):
+        if ev is None or ev.get('k') != 'run' or ev['state'] != 'pending':
+            return
+        status = (status or '').lower()
+        if status in ('', 'running', 'pending'):
+            return
+        if status in ('killed', 'stopped'):
+            ev['state'], ev['why'] = 'not_run', 'was stopped before it finished'
+        elif status == 'completed' and (code in (None, '0') or 'No matches found' in summary):
+            ev['state'], ev['why'] = read_output(ev['kind'], output or '')
+            if output and ev['kind'] != 'other':
+                ev['out'] = output[-20000:]
+        else:
+            ev['state'], ev['why'] = 'fail', ('exited with code %s' % code) if code not in (None, '0') else 'failed'
+
+    def _task_result(self, task, text, what, err):
+        ev = self.tasks.get(task)
+        if what == 'stop':
+            if not err:
+                self._settle(ev, 'stopped', None, None)
+            return
+        if err:
+            return
+        code = re.search(r'<exit_code>(-?\d+)</exit_code>', text)
+        out = re.search(r'<(?:output|stdout)>(.*?)(?:</(?:output|stdout)>|\Z)', text, re.S)
+        self._settle(ev, _tag(text, 'status'), code.group(1) if code else None, out.group(1) if out else None)
+
+    def _notice(self, text):
+        """A background task finished: <task-notification> names the tool call that started it."""
+        if '<task-notification>' not in (text or ''):
+            return
+        for block in re.findall(r'<task-notification>(.*?)(?:</task-notification>|\Z)', text, re.S):
+            ev = self.by_id.get(_tag(block, 'tool-use-id')) or self.tasks.get(_tag(block, 'task-id'))
+            summary = _tag(block, 'summary')
+            code = re.search(r'exit code (-?\d+)', summary)
+            output = None
+            if ev is not None and ev.get('kind') != 'other' and _tag(block, 'output-file'):
+                output = _read_tail(_tag(block, 'output-file'))   # gone in old sessions; then the status alone decides
+            self._settle(ev, _tag(block, 'status'), code.group(1) if code else None, output, summary)
+
+    def last_edit(self):
+        """Index of the last code edit that took effect, or -1."""
+        for k in range(len(self.events) - 1, -1, -1):
+            e = self.events[k]
+            if e['k'] == 'edit' and e['code'] and e['ok'] is not False:
+                return k
+        return -1
+
+
+# A claim made while saying that something still fails or is still running isn't hiding the result.
+ACK_FAIL = re.compile(r'\b[1-9]\d*\s+(?:tests?\s+)?(?:fail(?:s|ed|ing|ures?)?|errors?)\b'
+                      r'|\b(?:pre-?existing|unrelated|still (?:fail|fails|failing|broken|red)|known (?:failure|issue)|flaky|not related)\b'
+                      r'|[1-9]\d*\s*(?:条|项|个)\s*(?:测试)?\s*(?:失败|报错)|原有|本来就|无关|(?:仍|还)(?:有|在|是)?.{0,12}(?:失败|报错|没过)', re.I)
+NOT_PROOF = ('fail', 'timeout', 'not_run', 'pending', 'empty')
+
+
+def _describe(ev):
+    what = '`%s`' % _short(ev['cmd'], 60) if ev.get('cmd') else ev.get('name') or 'the check'
+    return '%s %s' % (what, ev.get('why') or 'did not pass')
+
+
+def _detail(runs_after):
+    """Why the runs after the last edit don't count, from the last one that didn't pass."""
+    bad = [e for e in runs_after if e['state'] in NOT_PROOF]
+    return (' (' + _describe(bad[-1]) + ')') if bad else ''
 
 
 def judge(turn, final_text=None, earlier=False):
@@ -226,29 +619,265 @@ def judge(turn, final_text=None, earlier=False):
 
     final_text: the agent's last message, from the Stop hook's last_assistant_message field.
     The transcript is written asynchronously and can miss that message, so it wins when present.
-    earlier: something ran successfully after the last code edit in an earlier turn (ran_after_edit).
+    earlier: an Evidence object with the session's earlier turns (this turn is added to it), or
+    True to mean only "a check passed in an earlier turn and no code changed after it".
     """
+    ev = earlier if isinstance(earlier, Evidence) else Evidence(seeded=bool(earlier))
+    ev.feed_turn(turn)
+    return verdict(ev, turn, final_text)
+
+
+def verdict(ev, turn, final_text=None):
+    """judge() for a turn that has already been fed into the session's Evidence."""
     actions, errors, said, raw = parse(turn)
     if final_text:
         said, raw = strip_quoted(final_text), final_text
     if not said.strip() or re.search(HEDGE, said, re.I):
         return None
-
     claim = _first(DONE, said)
     if claim:
-        ran = [k for k, (i, n, _) in enumerate(actions) if i not in errors and runs(n)]
-        code_edits = [k for k, (_, n, _) in enumerate(actions) if n in EDIT_TOOLS]
-        if code_edits:
-            if not [k for k in ran if k > code_edits[-1]]:
-                return 'done', claim, 'nothing ran successfully after the last edit'
-        # A wrap-up with no edits can lean on a check from an earlier turn, as long as no code changed since.
-        # Proof is looked for in the raw text: a hash in backticks or before a question still counts.
-        elif not ran and not earlier and not has_proof(raw) and not any(n == 'EditDoc' for _, n, _ in actions):
-            return 'done', claim, ('nothing ran in this turn and you cited no proof' if not actions else
-                                   'nothing you ran in this turn tested anything (only lookups, to-do updates or failed commands), '
-                                   'and you cited no proof')
-
+        v = _judge_done(ev, actions, claim, raw)
+        if v:
+            return v
     return judge_absent(turn, final_text)
+
+
+def _judge_done(ev, actions, claim, raw):
+    le = ev.last_edit()
+    after = [e for e in ev.events[le + 1:] if e['k'] == 'run']
+    # 'open' means no result was written yet. The transcript lags, so that isn't held against the claim.
+    passed = [e for e in after if e['state'] in ('pass', 'open')]
+    edited_now = le >= 0 and ev.events[le]['turn'] == ev.turn
+    if edited_now and not passed:
+        return 'done', claim, 'nothing ran successfully after the last edit' + _detail(after)
+    # Tests and builds: the latest finished one decides. A passing `ls -la` doesn't outweigh a failing `pytest`.
+    # A run the command itself says should fail (a mutation test) doesn't decide.
+    checks = [e for e in after if e['kind'] != 'other' and not e.get('expected')
+              and e['state'] in ('pass', 'fail', 'timeout', 'empty')]
+    if checks and checks[-1]['state'] != 'pass' and not ACK_FAIL.search(raw):
+        return 'done', claim, 'the last test or build after the edit did not pass: ' + _describe(checks[-1])
+    # A wrap-up with no edits can lean on a check from an earlier turn, as long as no code changed since.
+    # Proof is looked for in the raw text: a hash in backticks or before a question still counts.
+    if not passed and not edited_now and not has_proof(raw) and not any(n == 'EditDoc' for _, n, _ in actions):
+        return 'done', claim, ('nothing ran in this turn and you cited no proof' if not actions else
+                               'nothing you ran in this turn tested anything (only lookups, to-do updates or failed commands), '
+                               'and you cited no proof') + _detail(after)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Notes: worth a look, not proof that a claim is false. They never block; the user sees them.
+
+FIX = re.compile(r'\b(?:fix(?:ed|es)?|resolved?|repaired)\b|修复|修好|解决', re.I)
+TEST_FILE = re.compile(r'(?:^|/)(?:test_[^/]*|[^/]*_test\.\w+|[^/]*\.(?:test|spec)\.\w+|tests?/.*)$')
+COMPILED = re.compile(r'\.(?:ts|tsx|mts|cts|go|rs|java|kt|kts|swift|c|cc|cpp|cxx|h|hpp|cs|scala|m|mm)$', re.I)
+ARTIFACT = re.compile(r'(?:^|[\s;&|=])(?:node\s+|java\s+-jar\s+|bun\s+)?\.?/?(?:dist|build|out|target/(?:debug|release)|\.build/(?:debug|release)|bin)/[\w./-]+')
+_WRAPPERS = {'env', 'time', 'sudo', 'nice', 'npx', 'bunx', 'pnpx', 'uv', 'poetry', 'pipenv', 'pdm', 'hatch', 'run', 'exec'}
+_RUNNER_FLAG_ARGS = {'-k', '-m', '-c', '-p', '--rootdir', '--config', '-t', '--testNamePattern', '-run', '--grep', '-g',
+                     '--reporter', '--maxfail', '-n', '--tb', '-o', '--cov', '--cov-report', '--deselect', '--ignore'}
+
+
+def _test_part(cmd):
+    for part in _split_cmd(cmd):
+        if check_kind(part) == 'test':
+            return part
+    return None
+
+
+def check_key(cmd):
+    """(runner, targets) of a test command: what ran the tests and which files or names they were pointed at.
+    No targets means the whole suite."""
+    part = _test_part(cmd)
+    if not part:
+        return None
+    toks = [_unquote(t) for t in _tokens(part)]
+    while toks and (re.match(r'^[A-Za-z_]\w*=', toks[0]) or toks[0] in _WRAPPERS or toks[0] == 'cd'):
+        toks = toks[2:] if toks[0] == 'cd' else toks[1:]
+    if not toks:
+        return None
+    runner, rest = os.path.basename(toks[0]), toks[1:]
+    if re.match(r'^python\d?(?:\.\d+)?$', runner) and len(rest) >= 2 and rest[0] == '-m':
+        runner, rest = rest[1], rest[2:]
+    elif runner in ('npm', 'pnpm', 'yarn', 'go', 'cargo', 'swift', 'dotnet', 'make', 'deno', 'bun', 'mvn', 'gradle') and rest:
+        runner, rest = runner + ' ' + rest[0], rest[1:]
+    targets, i = [], 0
+    while i < len(rest):
+        t = rest[i]
+        if t in _RUNNER_FLAG_ARGS:
+            if t in ('-k', '-t', '--testNamePattern', '-run', '--grep', '-g') and i + 1 < len(rest):
+                targets.append('name:' + rest[i + 1])
+            i += 2
+            continue
+        if not t.startswith('-') and t not in ('run', 'discover', 'test', '--', '2>&1') and not re.match(r'^\d*>', t):
+            targets.append(t)
+        i += 1
+    if re.match(r'^python\d?', runner):          # python tests/test_x.py: the script is the target
+        runner = 'python'
+    return runner, tuple(targets)
+
+
+def _same_check(a, b):
+    ka, kb = check_key(a), check_key(b)
+    if not ka or not kb or ka[0] != kb[0]:
+        return False
+    ta, tb = set(ka[1]), set(kb[1])
+    if not ta or not tb or ta & tb:
+        return True
+    files = lambda ts: {t.split('::')[0].lstrip('./') for t in ts if not t.startswith('name:')}
+    return bool(files(ta) & files(tb))
+
+
+def _run_dir(ev):
+    """Where a command ran: the session's directory, moved by a leading `cd`."""
+    base = ev.get('cwd')
+    for part in _split_cmd(ev.get('cmd') or ''):
+        toks = _tokens(part)
+        if not toks or toks[0] != 'cd':
+            break
+        if len(toks) > 1:
+            d = os.path.expanduser(_unquote(toks[1]))
+            base = d if os.path.isabs(d) else (os.path.join(base, d) if base else None)
+    return os.path.normpath(base) if base else None
+
+
+def _changed(ev, le):
+    """Code files edited since the last test that passed before the last edit (the change the claim is about)."""
+    start = 0
+    for k in range(le - 1, -1, -1):
+        e = ev.events[k]
+        if e['k'] == 'run' and e['kind'] == 'test' and e['state'] == 'pass':
+            start = k + 1
+            break
+    out = []
+    for e in ev.events[start:le + 1]:
+        if e['k'] == 'edit' and e['code'] and e['ok'] is not False:
+            out.extend(p for p in e['paths'] if is_code(p) and os.path.isabs(p) and p not in out)
+    return out[-30:]
+
+
+def _module(path):
+    stem = os.path.splitext(os.path.basename(path))[0]
+    if stem in ('__init__', 'index', 'mod', 'main', 'lib'):
+        stem = os.path.basename(os.path.dirname(path)) or stem
+    return stem
+
+
+def _not_loaded(run, changed):
+    """The tests were pointed at files that never mention any changed file. None if unknown."""
+    key = check_key(run['cmd'])
+    base = _run_dir(run)
+    if not key or not base:
+        return None
+    files = [t.split('::')[0] for t in key[1] if not t.startswith('name:')]
+    files = [f for f in files if '/' in f or re.search(r'\.\w+$', f)]
+    if not files or not changed:
+        return None                               # the whole suite, or by name: can't tell what it loads
+    texts, dirs = [], []
+    for f in files:
+        p = os.path.normpath(f if os.path.isabs(f) else os.path.join(base, f))
+        rel = os.path.normpath(f).lstrip('./' if not os.path.isabs(f) else '')
+        if os.path.isdir(p):
+            dirs.append((p, rel))
+        elif os.path.isfile(p):
+            t = _read_tail(p, 524288)
+            if t is None:
+                return None
+            texts.append((p, rel, t))
+        else:
+            return None                           # moved or deleted since: can't tell
+    for c in changed:
+        # Compared by the path as the command wrote it, so a session from another machine still matches.
+        if any(c == p or c.endswith(os.sep + rel) for p, rel, _ in texts):
+            return None
+        if any(c.startswith(p + os.sep) or (os.sep + rel + os.sep) in c for p, rel in dirs):
+            return None
+        if any(re.search(r'(?<![\w])' + re.escape(_module(c)) + r'(?![\w])', t) for _, _, t in texts):
+            return None
+    shown = ', '.join(rel for _, rel, _ in texts) or ', '.join(rel for _, rel in dirs)
+    return ('not-loaded', 'the tests that passed (%s) never mention %s, so they may not load your change'
+            % (_short(shown, 60), _short(', '.join(os.path.basename(c) for c in changed[-3:]), 60)))
+
+
+def _repo_root(path, _cache={}):
+    """The nearest folder above path with a .git in it, or None."""
+    d = path if os.path.isdir(path) else os.path.dirname(path)
+    if d not in _cache:
+        found, cur = None, d
+        for _ in range(40):
+            if os.path.exists(os.path.join(cur, '.git')):
+                found = cur
+                break
+            up = os.path.dirname(cur)
+            if up == cur:
+                break
+            cur = up
+        _cache[d] = found
+    return _cache[d]
+
+
+def _elsewhere(run, changed):
+    """The check ran in another project than the edited files. None if it's the same one, or unknown."""
+    d = _run_dir(run)
+    if not d or not changed or not os.path.isdir(d) or not all(os.path.exists(c) for c in changed):
+        return None                               # moved, deleted, or another machine's paths: can't tell
+    if any(c == d or c.startswith(d + os.sep) for c in changed):
+        return None
+    root, roots = _repo_root(d), {_repo_root(c) for c in changed}
+    if root and None not in roots:
+        different = root not in roots
+    else:
+        try:
+            common = os.path.commonpath([d] + changed)
+        except ValueError:
+            common = ''
+        home = os.path.normpath(_home())
+        different = common in ('', os.sep, home, os.path.dirname(home)) or common.count(os.sep) < 2
+    if not different:
+        return None
+    return ('elsewhere', 'the check `%s` ran in %s, but the edits were in %s'
+            % (_short(run['cmd'], 40), d, _short(os.path.dirname(changed[-1]), 60)))
+
+
+def red_then_green(ev, le):
+    """A test failed before the edit at index le, and the same test passed after it."""
+    tests = [e for e in ev.events[le + 1:] if e['k'] == 'run' and e['kind'] == 'test' and e['state'] == 'pass']
+    reds = [e for e in ev.events[:max(le, 0)] if e['k'] == 'run' and e['kind'] == 'test' and e['state'] == 'fail']
+    return any(_same_check(r['cmd'], g['cmd']) for r in reds for g in tests)
+
+
+def notes(ev, claim):
+    """Notes for a "done" claim the hook let through: [(kind, text)]. Empty when there is nothing to add."""
+    le = ev.last_edit()
+    # Only with the turn that did the work (the edit or the runs after it), not again on every later wrap-up.
+    if le < 0 or not any(e['turn'] == ev.turn for e in ev.events[le:] if e['k'] in ('edit', 'run')):
+        return []
+    after = [e for e in ev.events[le + 1:] if e['k'] == 'run' and e['state'] == 'pass']
+    tests = [e for e in after if e['kind'] == 'test']
+    changed = _changed(ev, le)
+    out = []
+    if FIX.search(claim) and tests and not red_then_green(ev, le):
+        out.append(('no-red', 'tests passed after the last edit, but no run of them failed before it, '
+                              'so nothing here shows they catch the bug'))
+    if tests:
+        n = _not_loaded(tests[-1], changed)
+        if n:
+            out.append(n)
+        for c in changed:
+            name = re.escape(os.path.basename(c))
+            if re.search(r'(?m)(?:^|[\s/])' + name + r'\s+\d+\s+\d+(?:\s+\d+\s+\d+)?\s+0%|' + name + r'\s*\|\s*0(?:\.0+)?\s*\|',
+                         tests[-1].get('out') or ''):
+                out.append(('coverage-0', 'the coverage report shows %s at 0%%' % os.path.basename(c)))
+                break
+    checks = [e for e in after if e['kind'] != 'other']
+    if checks and all(_elsewhere(e, changed) for e in checks):
+        out.append(_elsewhere(checks[-1], changed))
+    built = any(e['kind'] == 'build' for e in after)
+    if not checks and not built and any(COMPILED.search(c) for c in changed):
+        stale = [e for e in after if ARTIFACT.search(e.get('cmd') or '')]
+        if stale and len(stale) == len(after):
+            out.append(('stale-build', '`%s` runs a build output, and nothing rebuilt it after the edit'
+                        % _short(stale[-1]['cmd'], 50)))
+    return out
 
 
 def _norm(value):
@@ -476,9 +1105,12 @@ def _first(patterns, text):
 
 def message(kind, claim, missing):
     if kind == 'done':
-        how = ('Run the check that proves it (the tests, the script, a request to the live URL) and show the result'
-               if 'after the last edit' in missing else
-               'Run the check and show the result, or cite proof you already have (a commit hash, a line like "14 passed" or "HTTP 200")')
+        if 'did not pass' in missing:
+            how = 'Make it pass and show the result, say what still fails'
+        elif 'after the last edit' in missing:
+            how = 'Run the check that proves it (the tests, the script, a request to the live URL) and show the result'
+        else:
+            how = 'Run the check and show the result, or cite proof you already have (a commit hash, a line like "14 passed" or "HTTP 200")'
         return f'claim-check: you wrote "{claim}", but {missing}. {how}, or say plainly that it isn\'t verified yet.'
     if 'one way' in missing:
         how = "Search a different way (another tool, or a different name or file), or say it's a guess."
@@ -488,6 +1120,7 @@ def message(kind, claim, missing):
 
 
 def log_block(payload, kind, claim, missing):
+    """Append one row to the audit log. kind 'note' rows are notes shown to you, not blocks."""
     try:
         os.makedirs(os.path.dirname(LOG), exist_ok=True)
         with open(LOG, 'a', encoding='utf-8') as f:
@@ -497,6 +1130,12 @@ def log_block(payload, kind, claim, missing):
                                ensure_ascii=False) + '\n')
     except OSError:
         pass
+
+
+def note_message(claim, found):
+    lines = [text for _, text in found]
+    head = f'claim-check note on "{claim}": '
+    return head + lines[0] + '.' if len(lines) == 1 else head + ' '.join(f'({k + 1}) {t}.' for k, t in enumerate(lines))
 
 
 def read_stdin():
@@ -695,46 +1334,105 @@ def hook():
     opts = plugin_options(payload.get('cwd'))
     if opts.get('enabled') is False:
         return 0
-    path = payload.get('transcript_path')
+    final = payload.get('last_assistant_message')
+    if isinstance(final, str) and final.strip() and not _makes_claim(final):
+        return 0                                    # nothing claimed: no need to read the transcript
     try:
-        last, earlier = last_turn(path)
-        verdict = judge(last, payload.get('last_assistant_message'), earlier)
+        ev, last = session(payload.get('transcript_path'), final)
+        if last is None:
+            return 0
+        v = verdict(ev, last, final)
+        claim = None if v else done_claim(last, final)
+        found = notes(ev, claim) if claim else []
     except Exception:                               # never block because of our own bug
         return 0
-    if verdict:
-        log_block(payload, *verdict)
+    if v:
+        log_block(payload, *v)
         if opts.get('log_only') is True:
             return 0                                # trial run: log what it would have blocked, let the turn end
         # additionalContext keeps Claude going, like decision "block", with the same loop protection
         # (stop_hook_active), but shows as "Stop hook feedback" instead of a hook error.
         print(json.dumps({'hookSpecificOutput': {'hookEventName': 'Stop',            # ASCII-safe for Windows consoles
-                                                 'additionalContext': message(*verdict)}}))
+                                                 'additionalContext': message(*v)}}))
+    elif found and opts.get('notes') is not False:
+        log_block(payload, 'note', claim, '; '.join(k for k, _ in found))
+        # systemMessage is shown to you; the turn ends as usual and the agent is not sent back.
+        print(json.dumps({'systemMessage': note_message(claim, found)}))
     return 0
 
 
-def last_turn(path):
-    """The transcript's last turn, and whether something ran after the last code edit before it."""
-    ts = list(turns(load(path)))
-    earlier = False
-    for t in ts[:-1]:
-        earlier = ran_after_edit(t, earlier)
-    return (ts[-1] if ts else None), earlier
+def _makes_claim(text):
+    said = strip_quoted(text)
+    return bool(said.strip()) and not re.search(HEDGE, said, re.I) and bool(_first(DONE, said) or _first(ABSENT, said))
+
+
+def done_claim(turn, final_text=None):
+    """The "done" claim in the final reply, or None (no claim, or an honest "not verified")."""
+    said = strip_quoted(final_text) if final_text else parse(turn)[2]
+    if not said.strip() or re.search(HEDGE, said, re.I):
+        return None
+    return _first(DONE, said)
+
+
+def _written(entries, final_text):
+    """Has the transcript caught up with the reply Claude Code handed the hook?"""
+    want = re.sub(r'\s+', ' ', final_text).strip()[-80:]
+    seen = 0
+    for e in reversed(entries):
+        if is_human(e):
+            return False
+        if e.get('type') != 'assistant':
+            continue
+        got = re.sub(r'\s+', ' ', _text(e)).strip()
+        if got and (want in got or got[-80:] in want):
+            return True
+        seen += 1
+        if seen >= 5:
+            return False
+    return False
+
+
+def session(path, final_text=None, wait=1.0):
+    """The session's Evidence and its last turn.
+
+    The transcript is written asynchronously. If the final reply isn't in it yet, the commands just
+    before it may be missing too, so wait up to `wait` seconds for it to catch up.
+    """
+    deadline = time.monotonic() + wait
+    while True:
+        entries = load(path)
+        if not final_text or _written(entries, final_text) or time.monotonic() >= deadline:
+            break
+        time.sleep(0.1)
+    ts = list(turns(entries))
+    ev = Evidence()
+    for t in ts:
+        ev.feed_turn(t)
+    return ev, (ts[-1] if ts else None)
 
 
 def check(path):
-    last, earlier = last_turn(path)
-    verdict = judge(last, earlier=earlier) if last else None
-    print(message(*verdict) if verdict else 'claim-check: pass')
-    return 1 if verdict else 0
+    ev, last = session(path)
+    v = verdict(ev, last) if last else None
+    print(message(*v) if v else 'claim-check: pass')
+    claim = None if v or not last else done_claim(last)
+    found = notes(ev, claim) if claim else []
+    if found:
+        print(note_message(claim, found))
+    return 1 if v else 0
 
 
-REASONS = {        # how replay groups the turns it would have blocked
-    'nothing ran successfully after the last edit': 'nothing ran successfully after the last code edit',
-    'nothing ran in this turn and you cited no proof':
-        'no tool calls in the turn, nothing run since the last code edit, no proof cited',
-    'nothing you ran in this turn tested anything (only lookups, to-do updates or failed commands), and you cited no proof':
-        'only lookups, to-do updates or failed commands',
-}
+REASONS = (        # how replay groups the turns it would have blocked, by the start of the reason
+    ('nothing ran successfully after the last edit', 'nothing ran successfully after the last code edit'),
+    ('the last test or build after the edit did not pass', 'the last test or build after the code edit did not pass'),
+    ('nothing ran in this turn and you cited no proof',
+     'no tool calls in the turn, nothing run since the last code edit, no proof cited'),
+    ('nothing you ran in this turn tested anything', 'only lookups, to-do updates or failed commands'),
+)
+
+
+def _reason(missing):
+    return next((label for start, label in REASONS if missing.startswith(start)), missing)
 
 
 def _n(n, one, many=None):
@@ -745,19 +1443,21 @@ def replay(root):
     if not os.path.isdir(root):
         print(f'No such directory: {root}')
         return 1
-    files = glob.glob(os.path.join(root, '**', '*.jsonl'), recursive=True)
+    files = sorted(glob.glob(os.path.join(root, '**', '*.jsonl'), recursive=True))
+    # The Stop hook runs for the main agent only. Subagent transcripts are judged by nobody, so skip them.
+    main = [f for f in files if (os.sep + 'subagents' + os.sep) not in f]
     n_turns = dups = 0
     done_seen = set()
     seen = {'done': [0, 0], 'absent': [0, 0]}      # turns with the claim, turns that would be blocked
-    why = {}
-    for f in files:
+    why, noted, kinds, red_green = {}, 0, {}, [0, 0]
+    for f in main:
         try:
-            ts = list(turns(load(f)))
+            entries = [e for e in load(f) if not e.get('isSidechain')]
         except OSError:
             continue
-        earlier = False
-        for t in ts:
-            ok_before, earlier = earlier, ran_after_edit(t, earlier)
+        ev = Evidence()
+        for t in turns(entries):
+            ev.feed_turn(t)
             said = parse(t)[2]
             # A resumed or forked session copies earlier turns into a new file. Skip exact copies only:
             # the same message id can also start a turn that went on differently, and that one counts.
@@ -770,15 +1470,26 @@ def replay(root):
             for kind, pats in (('done', DONE), ('absent', ABSENT)):
                 if _first(pats, said):
                     seen[kind][0] += 1
-            v = judge(t, earlier=ok_before)
+            v = verdict(ev, t)
             if v and v[0] == 'done':
                 seen['done'][1] += 1
-                r = REASONS.get(v[2], v[2])
+                r = _reason(v[2])
                 why[r] = why.get(r, 0) + 1
+            claim = None if (v and v[0] == 'done') else done_claim(t)
+            if claim:
+                found = notes(ev, claim)
+                noted += bool(found)
+                for k, _ in found:
+                    kinds[k] = kinds.get(k, 0) + 1
+                if FIX.search(claim) and ev.last_edit() >= 0:
+                    red_green[0] += 1
+                    red_green[1] += red_then_green(ev, ev.last_edit())
             if judge_absent(t):                     # counted on its own, even when "done" was blocked too
                 seen['absent'][1] += 1
-    print(f'{_n(len(files), "transcript")}, {_n(n_turns, "turn")}'
-          + (f' ({_n(dups, "copy", "copies")} from resumed sessions skipped).' if dups else '.'))
+    skipped = len(files) - len(main)
+    print(f'{_n(len(main), "transcript")}, {_n(n_turns, "turn")}'
+          + (f' ({_n(dups, "copy", "copies")} from resumed sessions skipped)' if dups else '')
+          + (f'; {_n(skipped, "subagent transcript")} skipped, the Stop hook does not run there.' if skipped else '.'))
     for kind, label in (('done', '"done / fixed / deployed"'), ('absent', '"not found / doesn\'t exist"')):
         c, b = seen[kind]
         print(f'  {label}: {_n(c, "turn ends", "turns end")} with the claim; {b} {"has" if b == 1 else "have"} no proof by these rules ({b / c:.0%}).' if c
@@ -786,6 +1497,11 @@ def replay(root):
         if kind == 'done':
             for r, n in sorted(why.items(), key=lambda x: -x[1]):
                 print(f'      {n:5}  {r}')
+    if noted:
+        print(f'  Notes (shown to you, never block) on {_n(noted, "claim")} it let through: '
+              + ', '.join(f'{n} {k}' for k, n in sorted(kinds.items(), key=lambda x: -x[1])) + '.')
+    if red_green[0]:
+        print(f'  "fixed" after a code edit: {red_green[0]:,}; with a test that failed before the edit and passed after: {red_green[1]:,}.')
     return 0
 
 
@@ -803,6 +1519,10 @@ def report(path=None):
     except OSError:
         print(f'No blocks logged yet ({path}).')
         return 0
+    shown_notes = sum(1 for r in rows if r.get('kind') == 'note')
+    rows = [r for r in rows if r.get('kind') != 'note']   # notes never blocked anything
+    if shown_notes:
+        print(f'{_n(shown_notes, "note")} shown (they never block).')
     if not rows:
         print(f'No blocks logged yet ({path}).')
         return 0

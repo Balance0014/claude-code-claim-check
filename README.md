@@ -4,7 +4,7 @@
 
 Claude Code says "done" or "fixed" when it didn't verify the change. claim-check catches that claim before you trust it.
 
-[中文说明](README.zh-CN.md) · 0.5.1 · MIT · Python 3.9+, no dependencies
+[中文说明](README.zh-CN.md) · 0.6.0 · MIT · Python 3.9+, no dependencies
 
 The agent edits `src/auth/redirect.ts`. Nothing runs after that edit, and it still says:
 
@@ -39,14 +39,35 @@ On November 4, 2026, I replayed my own Claude Code history through the hook: 3,9
 
 After I posted it, a commenter argued that the 77 matter most, because a hook that blocks a correct wrap-up gets turned off. So 0.3.0 counts a check from an earlier turn, as long as no code was edited after it. Of the same 406 claims, it blocks 2. The cost is that a wrap-up no longer has to show its proof.
 
-How those 86 split, the rest of that hand check, and 17 "not found" turns are in [The replay](#the-replay).
+0.6.0 reads how each command ended, not just that it ran. On November 17, 2026, I replayed the sessions on my current computer through 0.5.1 and 0.6.0: of 458 "done" claims, 0.5.1 blocks 1 and 0.6.0 blocks 2. The extra one is real. The tests had passed, then the agent changed code with `sed -i` and still said the tests pass.
+
+How those 86 split, the rest of that hand check, the 0.6.0 replay and the "not found" turns are in [The replay](#the-replay).
 
 ## What counts as verification
 
-- **In the hook.** A check from before the last code edit doesn't count. claim-check looks for a shell command, MCP tool, URL fetch or subagent that ran after that edit and didn't fail, in this turn or an earlier one. Reading the file again doesn't count, and neither does a look-only command (`cat`, `grep`, `git diff`, and the rest of the list below). Saying it isn't verified yet always passes.
-- **Planned.** Exit codes of test and build commands. Today any command that isn't on the look-only list counts, as long as it didn't fail, and the hook doesn't read the exit code. The words "exit code 0" in the reply count as cited proof only when that turn edited no code.
-- **Planned.** Regression tests that fail before the change and pass after.
-- **Planned.** Tests that load the changed file. The hook can see that a command ran after the edit. It can't see whether that command loaded the file.
+- **A check that ran after the last code edit and passed.** A shell command, MCP tool, URL fetch or subagent, in this turn or an earlier one. A check from before the last code edit doesn't count. Reading the file again doesn't count, and neither does a look-only command (`cat`, `grep`, `git diff`, and the rest of the list below). Saying it isn't verified yet always passes.
+- **How it ended, not just that it ran.** For test and build commands, the hook reads the exit code and the runner's own summary line. `pytest 2>&1 | tail -3` exits 0 through the pipe, but if it printed "2 failed", it failed. A command that timed out, was denied, never started (`command not found`), was still running in the background, or ran zero tests isn't proof. A background run counts once its notification or `TaskOutput` says it finished with exit code 0. The words "exit code 0" in the reply count as cited proof only when that turn edited no code.
+- **The last test or build decides.** If it failed, a later command that passed (a `curl`, a script) doesn't make up for it. A reply that says what still fails ("1 test still fails, it was failing before") passes.
+- **Every code edit resets it.** That includes edits made with a shell command, when Claude Code reports that the command changed a source file (`sed -i`, `cat > app.py <<EOF`). A failed edit, `git pull` or `git checkout`, and a script that writes `.json` or `.csv` aren't edits. Neither is editing `.md`, `.markdown`, `.rst` or `.adoc` files.
+- **Did the tests catch the bug? A note, not a block.** For a "fixed" claim, it looks for the same test failing before the last edit and passing after. If there's no failing run, you get a one-line note. In my replay, 6 of 85 "fixed" claims after a code edit had one. Blocking the other 79 would send back most "fixed" claims, including small fixes checked by running the program, so it's a note.
+- **Did the tests load the change? A note, best effort.** If the test command names files (`pytest tests/test_auth.py`) and none of them is the changed file, sits in a named folder that holds it, or mentions its module name, you get a note. It also notes a coverage report in the test output that shows the changed file at 0%, a check that ran in a different git repository from the edits, and a build output (`./dist/...`) run without a rebuild. It can't see inside a whole-suite run (`pytest`, `npm test`), tests picked by name (`-k`), imports through another module, or code loaded at runtime, so it says nothing about those. No note doesn't mean the change was covered. It doesn't run coverage itself.
+
+A failing test run after the edit gets sent back:
+
+```text
+claim-check: you wrote "is fixed", but nothing ran successfully after the last edit (`pytest 2>&1 | tail -3`
+printed a failure (=== 2 failed, 5 passed in 1.20s ===)). Run the check that proves it (the tests, the script,
+a request to the live URL) and show the result, or say plainly that it isn't verified yet.
+```
+
+A note is shown to you, not the agent, and the turn ends as usual:
+
+```text
+claim-check note on "is fixed": tests passed after the last edit, but no run of them failed before it,
+so nothing here shows they catch the bug.
+```
+
+Notes come with the turn that did the work (the edit or the runs after it), not again on every later wrap-up.
 
 ![claim-check blocks an unproven "is fixed" in Claude Code; the agent then runs the tests and answers with the result](docs/demo.svg)
 
@@ -60,14 +81,15 @@ The two agent replies that have cost me the most time are "it's fixed," when not
 
 | The agent says | It needs |
 | --- | --- |
-| "fixed", "deployed", "tests pass", "done", "已修复", "已上线" | Something that ran **after the last code edit** and didn't fail: a shell command, any MCP tool (browser, API), a URL fetch or a subagent |
-| The same, in a turn with no code edits and nothing run | A check from an earlier turn, if no code was edited after it. Otherwise, proof cited in the reply (see below). A turn that only edits docs passes. |
+| "fixed", "deployed", "tests pass", "done", "已修复", "已上线" | Something that ran **after the last code edit** and passed: a shell command, any MCP tool (browser, API), a URL fetch or a subagent. If the last test or build after the edit failed, that wins. |
+| The same, in a turn with no code edits and nothing run | A check from an earlier turn that passed, if no code was edited after it. Otherwise, proof cited in the reply (see below). A turn that only edits docs passes. |
+| "fixed", after a code edit, with tests that passed | Nothing more. You get a note if no run of those tests failed before the edit, or if the test files it named never mention the changed file. Notes never block. |
 | "doesn't exist", "nothing calls it", "没找到" | Two lookups in this turn, of different kinds. The same search twice doesn't count. |
 | "not verified yet", "untested", "还没验证" | Nothing. Saying it isn't verified always passes. |
 
 The second lookup has to be a different kind. Searching for the same text again doesn't count, even in another folder or with different flags. A different text, a different file, or a different tool does. Shell `grep` and the Grep tool are different tools, and so are `grep` and `rg`. Reading a file and `cat` (or `head`) on that same file are one lookup.
 
-**Not a check:** commands on a fixed look-only list (`cd`, `cat`, `head`, `tail`, `less`, `more`, `grep`, `rg`, `ls`, `find`, `wc`, `stat`, `file`, `pwd`, `echo`, `git status`, `git diff`, `git log`, `git show`), alone or chained with `&&`, `;`, `||` or a pipe; a command that failed; re-reading a file; updating a to-do list. Every other command counts, even one that only looks, such as `sed -n`, `awk`, `jq` or `git -C repo diff`, and so does any PowerShell command. Editing `.md`, `.markdown`, `.rst` or `.adoc` files after the check is fine.
+**Not a check:** commands on a fixed look-only list (`cd`, `cat`, `head`, `tail`, `less`, `more`, `grep`, `rg`, `ls`, `find`, `wc`, `stat`, `file`, `pwd`, `echo`, `git status`, `git diff`, `git log`, `git show`), alone or chained with `&&`, `;`, `||` or a pipe; a command that failed, timed out, was denied or was still running in the background; a test run that ran zero tests; re-reading a file; updating a to-do list. Every other command counts, even one that only looks, such as `sed -n`, `awk`, `jq` or `git -C repo diff`, and so does any PowerShell command. Editing `.md`, `.markdown`, `.rst` or `.adoc` files after the check is fine.
 
 **Cited proof:**
 
@@ -85,6 +107,44 @@ The second lookup has to be a different kind. Searching for the same text again 
 It never blocks twice in a row, so the agent can't get stuck, and if the hook itself crashes, it lets the turn end.
 
 ## The replay
+
+### November 17, 2026: 0.5.1 and 0.6.0
+
+I replayed the sessions on the computer I use now through both versions: 676 main-session transcripts, 4,197 turns after skipping 7,073 copies from resumed sessions. I also skipped 575 subagent transcripts, because the Stop hook doesn't run for subagents. 0.5.1's `replay` counted them, which added a block that could never happen. These aren't the sessions from the November 4 replay: the older ones stayed on my previous computer.
+
+- 458 turns ended with a "done" claim. 0.5.1 blocks 1 and 0.6.0 blocks 2. The one they share is a claim after a code edit with nothing run since. The new one is real too: the tests passed, the agent changed code with `sed -i`, and it still said the tests pass. 0.5.1 counted the `sed` command as the check. No claim 0.5.1 blocked gets through 0.6.0.
+- The false blocks 0.6.0 removes, a failed edit counted as an edit and a transcript that hadn't caught up yet, didn't come up in this replay. A replay reads finished transcripts, so it can't show the second kind at all. Both are in the tests and in the table below.
+- While I was writing 0.6.0, the first draft of the new rules blocked 24 more claims in this replay. Reading them, most were false: `git pull` counted as an edit, the word `test` inside a heredoc read as a test command, a later step's exit code blamed on the tests, a test that was meant to fail. Each became a rule fix and a test, until the one `sed -i` block above was left. Nothing was switched off to get there. Every case in the table that 0.5.1 blocks, 0.6.0 still blocks.
+- 17 claims it let through got notes: 15 for "fixed" with no failing run before the edit, and 3 for tests that never mention the changed file. All 3 are from one session, about the same change, and the test file named on the command line really doesn't mention either changed file. 85 "fixed" claims came after a code edit, and 6 of them had a test that failed before the edit and passed after.
+- 23 turns ended with "not found", and 2 are blocked. Those rules didn't change. Reading both, I think they're false positives: one listed search terms that had returned nothing, the other summarized a data pipeline's output. That's still open.
+
+This replay doesn't tell you how many of the 456 claims it let through were wrong. Nobody labelled those. I had Claude read the individual cases above in the local transcripts, so they aren't a hand-labelled set. Nothing from the transcripts left my machine. On my largest transcript (130 MB), the hook takes 0.7 seconds.
+
+The same cases on both versions. They're from the tests, run through each version's code:
+
+| Case | 0.5.1 | 0.6.0 |
+| --- | --- | --- |
+| An edit failed ("String not found") after the tests passed, then "Fixed." | blocks (wrongly) | passes |
+| The tests passed, but the transcript caught up 0.3 s after the hook started | blocks (wrongly) | passes |
+| The only test run after the edit exited 1, or was denied | blocks | blocks |
+| The test run timed out and was moved to the background | passes | blocks |
+| `pytest 2>&1 \| tail -3` exited 0 but printed "2 failed" | passes | blocks |
+| The test run collected 0 tests | passes | blocks |
+| A background test run was still running, or finished with exit code 1 | passes | blocks |
+| A background test run finished with exit code 0 | passes | passes |
+| `pytest` failed, then an unrelated command passed | passes | blocks |
+| `pytest` failed, and the reply says which test still fails | passes | passes |
+| The tests passed, then `sed -i` changed code | passes | blocks |
+| The tests passed, then `git pull` changed files | passes | passes |
+| A check passed in an earlier turn, with no edit since | passes | passes |
+| A check passed, then code was edited in a later turn and nothing ran | blocks | blocks |
+| A check failed in an earlier turn, then "All done." | blocks | blocks |
+| Code edited, nothing run | blocks | blocks |
+| A test failed before the fix and passed after | passes | passes |
+| The tests passed but never failed before, then "The bug is fixed." | passes | passes, with a note |
+| The test file named on the command line never mentions the changed file | passes | passes, with a note |
+
+### November 4, 2026: 0.2.0 and 0.3.0
 
 On November 4, 2026, I replayed my own Claude Code history through the hook: 3,977 turns, after dropping 1,649 duplicates (resuming a session copies its earlier turns into a new file). Of those, 406 ended with a claim like "done," "fixed," "deployed" or "tests pass," and version 0.2.0 would have blocked 86. Most of the 86 weren't the case I built it for.
 
@@ -129,13 +189,13 @@ Clone the repo and run:
 python3 claim_check.py replay
 ```
 
-It reads your past sessions in `~/.claude/projects` and prints how many "done" and "not found" claims the hook would have blocked and, for "done" claims, why. Nothing leaves your machine.
+It reads your past sessions in `~/.claude/projects` and prints how many "done" and "not found" claims the hook would have blocked and, for "done" claims, why. It also prints the notes it would have shown and how many "fixed" claims had a test that failed before the edit. It skips subagent transcripts, since the hook doesn't run there. Nothing leaves your machine.
 
 ## Audit it
 
-Every block is written to `~/.claude/claim-check/blocks.jsonl`. The hook always uses that path. Run `python3 claim_check.py report` in a clone of this repo to print the last ten, or `python3 claim_check.py report --log <path>` to read a different file.
+Every block is written to `~/.claude/claim-check/blocks.jsonl`, and so is every note, with `"kind": "note"`. The hook always uses that path. Run `python3 claim_check.py report` in a clone of this repo to print the last ten, or `python3 claim_check.py report --log <path>` to read a different file.
 
-To try it without blocking, set the plugin option `log_only` to `true`. It logs what it would have blocked and lets every turn end, so you can read the log for a week before turning blocking on. To turn the hook off, set `enabled` to `false`. In Claude Code those show up as "Log only" and "Check claims": open `/config` and find claim-check, or run `claude plugin configure claim-check`. The same values can be written by hand in your user settings:
+To try it without blocking, set the plugin option `log_only` to `true`. It logs what it would have blocked and lets every turn end, so you can read the log for a week before turning blocking on. To turn the hook off, set `enabled` to `false`. To stop the notes and keep the blocks, set `notes` to `false`. In Claude Code those show up as "Log only", "Check claims" and "Show notes": open `/config` and find claim-check, or run `claude plugin configure claim-check`. The same values can be written by hand in your user settings:
 
 ```json
 {
@@ -160,13 +220,19 @@ If it blocks something it shouldn't, [open an issue](https://github.com/Balance0
 - Any 7-to-40-character string of hex letters and digits counts as a commit hash, so an ID like `a1b2c3d4` passes as proof.
 - Any MCP tool call or subagent counts as a check, even one that only reads.
 - In a turn with no edits, any check from an earlier turn counts if no code was edited after it, even one unrelated to the claim. Tests run in one turn and "Deployed." in the next gets through.
-- A command after the edit proves that something ran. It doesn't prove the command tested the right thing.
+- It reads whether the tests passed, not what they cover. Whether they reached the change is only a note, and only when the test command names files. A whole-suite run that never imports the change passes with no note.
+- It recognizes the summary lines of common runners: pytest, unittest, Jest, Vitest, Mocha, `go test`, Cargo, TAP, `tsc`, gcc and clang, npm, make, Gradle, Maven and `xcodebuild`. For anything else, only the exit code counts, so a failure hidden by a pipe gets through. `go test ./... | tail` can cut off the package that failed.
+- It decides that a failing run was acknowledged by words in the reply ("still fails", "pre-existing", "1 failed", 仍有…失败). An honest reply worded some other way is blocked, and any of those words lets a failing run through.
+- A test meant to fail (a mutation test, the bug reproduced before the fix) is recognized only by words in the command, such as `# should fail` or `mutation`.
+- Any edit to a file that isn't docs counts as a code edit, so a config change after the tests needs a new check even if it can't affect them.
 - For "not found", it only checks that the two lookups weren't the same kind. It can't tell whether the second one could have found the thing.
 - It only understands claims in English and Chinese.
 - Markdown table rows are skipped, so a status table with "fixed" or "已修复" in a cell gets through.
 - A finding that uses claim words, like "I verified that it makes the model worse," is blocked as if it were finished work. So is a condition that comes after the claim ("that's done once it's merged").
-- It tracks edits made with Claude Code's edit tools. A file changed by a shell command such as `sed -i` isn't seen as an edit, and the `sed` command itself counts as the check.
-- Claude Code writes the transcript asynchronously. If the last command hasn't been written when the hook runs, a claim that was checked can be blocked.
+- A shell command counts as an edit only when Claude Code records which files it changed and the command looks like it writes (`sed -i`, `>`, `tee`, `cp`, `mv`, `patch`, a script calling `.write(`). A file changed some other way isn't seen, and neither is a shell change to a file that isn't source code (`.json`, `.yaml`, `.env`). If another program changes a source file while a writing command runs, that can be taken as the agent's edit.
+- When a background test finishes, the hook reads the end of its output file. In old sessions that file is usually gone, so `replay` goes by the exit code alone.
+- Claude Code writes the transcript asynchronously. The hook waits up to a second for it to catch up with the final message. If it's further behind than that, the hook judges what's there, and a claim that was checked can still be blocked.
+- The transcript is Claude Code's internal format and can change. If it does, the hook can misread a session. A result it can't find is treated as not written yet, which lets the claim through.
 - On Windows, if `python3` isn't on your PATH, change it to `python` in `hooks/hooks.json` or your settings.
 
 ## FAQ

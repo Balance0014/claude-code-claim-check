@@ -732,5 +732,404 @@ class ReplayCounts(unittest.TestCase):
         self.assertIn('1  no tool calls in the turn', out)
 
 
+
+# ---------------------------------------------------------------------------
+# 0.6.0: the session's timeline, real outcomes, red-then-green, and notes.
+
+def bash(command, out='ok', error=False, extra=None, uid=None, name='Bash', **inp):
+    """A shell call and its result. extra is Claude Code's toolUseResult (bashEditDiff, backgroundTaskId, ...)."""
+    i = uid or f'toolu_{next(N)}'
+    result = {'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': i, 'is_error': error,
+                                                        'content': out}]}}
+    if extra is not None:
+        result['toolUseResult'] = extra
+    return [{'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'id': i, 'name': name,
+                                                           'input': dict(inp, command=command)}]}}, result]
+
+
+def edit(path='/repo/app.py', error=False):
+    return tool('Edit', error=error, file_path=path)
+
+
+def notice(uid, status='completed', code=0, task='b1'):
+    summary = (f'Background command "tests" completed (exit code {code})' if status == 'completed'
+               else f'Background command "tests" failed with exit code {code}')
+    return you(f'<task-notification>\n<task-id>{task}</task-id>\n<tool-use-id>{uid}</tool-use-id>\n'
+               f'<status>{status}</status>\n<summary>{summary}</summary>\n</task-notification>')
+
+
+def session(*turns_):
+    """Verdict on the last turn, with the earlier turns as the session's history."""
+    ev = C.Evidence()
+    for t in turns_[:-1]:
+        ev.feed_turn(t)
+    return C.judge(turns_[-1], earlier=ev)
+
+
+def later(text, *parts):
+    out = [you('next')]
+    for p in parts:
+        out.extend(p if isinstance(p, list) else [p])
+    return out + [say(text)]
+
+
+PYTEST_FAIL = 'Exit code 1\n=== 1 failed, 4 passed in 0.31s ==='
+
+
+class Outcomes(unittest.TestCase):
+    """What a command's result says, not what the reply says about it."""
+
+    def test_a_non_zero_exit_is_not_proof(self):
+        v = C.judge(turn(edit(), bash('pytest', PYTEST_FAIL, error=True), say('Tests pass now.')))
+        self.assertIn('nothing ran successfully after the last edit', v[2])
+        self.assertIn('exited with code 1', v[2])
+
+    def test_a_timed_out_command_is_not_proof(self):
+        out = 'Command did not complete within its 120s timeout and was moved to the background with ID: b1.'
+        v = C.judge(turn(edit(), bash('pytest', out, extra={'timedOutAfterMs': 120000, 'backgroundTaskId': 'b1'}),
+                         say('Fixed.')))
+        self.assertIn('timed out', v[2])
+        v = C.judge(turn(edit(), bash('pytest', 'Command timed out after 2m 0s', error=True), say('Fixed.')))
+        self.assertIn('timed out', v[2])
+
+    def test_a_command_that_never_ran_is_not_proof(self):
+        for out in ('Error: Permission for this action was denied by the Claude Code auto mode classifier.',
+                    "The user doesn't want to proceed with this tool use.", 'Exit code 127\nbash: pytest: command not found'):
+            v = C.judge(turn(edit(), bash('pytest', out, error=True), say('Fixed.')))
+            self.assertIn('did not run', v[2], out)
+
+    def test_a_background_run_counts_only_once_it_finished(self):
+        start = bash('pytest', 'Command running in background with ID: b1', extra={'backgroundTaskId': 'b1'}, uid='t-bg')
+        v = C.judge(turn(edit(), start, say('Fixed.')))
+        self.assertIn('still running in the background', v[2])
+        self.assertIsNone(C.judge(turn(edit(), start, notice('t-bg'), say('Fixed.'))))
+        v = C.judge(turn(edit(), start, notice('t-bg', 'failed', 1), say('Fixed.')))
+        self.assertIn('exited with code 1', v[2])
+
+    def test_reading_or_stopping_a_background_run_settles_it(self):
+        start = bash('pytest', 'Command running in background with ID: b2', extra={'backgroundTaskId': 'b2'})
+        done = tool('TaskOutput', task_id='b2')
+        done[1]['message']['content'][0]['content'] = '<status>completed</status>\n<exit_code>0</exit_code>\n<output>5 passed</output>'
+        self.assertIsNone(C.judge(turn(edit(), start, done, say('Fixed.'))))
+        failed = tool('TaskOutput', task_id='b2')
+        failed[1]['message']['content'][0]['content'] = '<status>completed</status>\n<exit_code>2</exit_code>'
+        self.assertIn('exited with code 2', C.judge(turn(edit(), start, failed, say('Fixed.')))[2])
+        self.assertIn('stopped', C.judge(turn(edit(), start, tool('TaskStop', task_id='b2'), say('Fixed.')))[2])
+
+    def test_an_unfinished_check_doesnt_block_when_something_else_passed(self):
+        start = bash('pytest', 'Command running in background with ID: b3', extra={'backgroundTaskId': 'b3'})
+        self.assertIsNone(C.judge(turn(edit(), start, bash('curl -s https://example.com/health'), say('It is deployed.'))))
+
+    def test_a_check_that_also_writes_a_report_is_still_a_check(self):
+        diff = {'bashEditDiff': {'files': [{'filePath': '/repo/report.md', 'hunks': []}]}}
+        self.assertIsNone(C.judge(turn(edit(), bash('for t in a b; do python3 $t.py; done > report.md', extra=diff),
+                                       say('Fixed.'))))
+
+    def test_a_background_subagent_counts_only_once_it_finished(self):
+        start = bash('', 'Async agent launched successfully.\nagentId: a1', name='Agent', uid='t-agent')
+        self.assertIsNotNone(C.judge(turn(edit(), start, say('Fixed.'))))
+        self.assertIsNone(C.judge(turn(edit(), start, notice('t-agent', task='a1'), say('Fixed.'))))
+
+    def test_a_failure_hidden_by_a_pipe_is_read_from_the_summary(self):
+        for cmd, out in (('pytest 2>&1 | tail -3', '=== 2 failed, 5 passed in 1.20s ==='),
+                         ('python -m unittest discover | tail -2', 'Ran 7 tests in 0.1s\n\nFAILED (failures=2)'),
+                         ('npm test || true', 'Tests:       1 failed, 9 passed, 10 total'),
+                         ('cargo test | tail', 'test result: FAILED. 3 passed; 1 failed'),
+                         ('npx tsc --noEmit | tail', "src/a.ts(3,5): error TS2322: Type 'x'.\nFound 1 error in src/a.ts")):
+            v = C.judge(turn(edit(), bash(cmd, out), say('Fixed.')))
+            self.assertIn('printed a failure', v[2], cmd)
+
+    def test_a_run_of_zero_tests_is_not_proof(self):
+        for cmd, out in (('pytest -k nothing', 'collected 0 items\n\n=== no tests ran in 0.01s ==='),
+                         ('python -m unittest tests.missing | tail -3', 'Ran 0 tests in 0.000s\n\nNO TESTS RAN'),
+                         ('npx jest src/none', 'No tests found, exiting with code 0')):
+            v = C.judge(turn(edit(), bash(cmd, out), say('Fixed.')))
+            self.assertIn('ran no tests', v[2], cmd)
+        # Some modules ran tests and one ran none: that's not an empty run.
+        out = 'test_a: OK\ntest_b: OK\ntest_c: NO TESTS RAN'
+        self.assertIsNone(C.judge(turn(edit(), bash('for t in a b c; do python3 -m unittest $t | tail -1; done', out),
+                                       say('Fixed.'))))
+
+    def test_a_crash_after_a_zero_exit_is_not_proof(self):
+        out = 'Traceback (most recent call last):\n  File "app.py", line 3\nValueError: bad config'
+        self.assertIn('Python traceback', C.judge(turn(edit(), bash('python app.py | tail -5', out), say('Fixed.')))[2])
+
+    def test_the_last_failing_test_decides_over_an_unrelated_success(self):
+        t = turn(edit(), bash('pytest', PYTEST_FAIL, error=True), bash('python app.py --help'), say('Fixed.'))
+        v = C.judge(t)
+        self.assertIn('the last test or build after the edit did not pass', v[2])
+        self.assertIn('say what still fails', C.message(*v))
+
+    def test_saying_what_still_fails_is_not_hiding_it(self):
+        for text in ('Fixed the parser. 1 test in test_legacy.py still fails; it was failing before.',
+                     'The parser is fixed; the remaining failure is pre-existing.', '解析器已修复,还有 1 个测试失败,是原有问题。'):
+            t = turn(edit(), bash('pytest', PYTEST_FAIL, error=True), bash('python app.py --help'), say(text))
+            self.assertIsNone(C.judge(t), text)
+
+    def test_a_later_passing_run_of_the_tests_counts(self):
+        self.assertIsNone(C.judge(turn(edit(), bash('pytest', PYTEST_FAIL, error=True), bash('pytest', '5 passed'),
+                                       say('Fixed.'))))
+
+    def test_red_then_green_in_one_command_is_green(self):
+        out = 'FAILED (failures=1)\n' + '-' * 20 + '\nRan 3 tests in 0.1s\n\nOK'
+        self.assertIsNone(C.judge(turn(edit(), bash('python -m unittest t_old; python -m unittest t_new', out),
+                                       say('Fixed.'))))
+
+    def test_another_step_failing_is_not_a_test_failure(self):
+        # pytest passed, git push failed: the push is not a failing check, and curl still proves something.
+        out = 'Exit code 1\n3 passed in 0.12s\nerror: failed to push some refs'
+        self.assertIsNone(C.judge(turn(edit(), bash('pytest -q; git push', out, error=True),
+                                       bash('curl -s localhost:8000/health'), say('Fixed.'))))
+
+    def test_a_run_meant_to_fail_is_not_a_failed_check(self):
+        t = turn(edit(), bash('pytest', '5 passed'),
+                 bash('cp -r . /tmp/m && cd /tmp/m && sed -i s/x/y/ app.py && pytest  # mutation: must fail',
+                      PYTEST_FAIL, error=True),
+                 say('Fixed.'))
+        self.assertIsNone(C.judge(t))
+
+    def test_a_label_then_its_number_is_not_a_failure(self):
+        self.assertIsNone(C.judge(turn(edit(), bash('python3 tests/run_tests.py', 'OK\nrun 43 fail 0 err 0'),
+                                       say('Fixed.'))))
+
+    def test_commands_are_classified_by_what_they_run(self):
+        for cmd, kind in (('pytest -q', 'test'), ('cd repo && npm test', 'test'), ('uv run pytest', 'test'),
+                          ('go test ./...', 'test'), ('for t in a b; do python3 -m unittest $t; done', 'test'),
+                          ('npx tsc --noEmit', 'build'), ('make', 'build'), ('cargo build --release', 'build'),
+                          ('git add tests/test_x.py', 'other'), ('echo pytest', 'other'), ('make deploy', 'other'),
+                          ('jest --watch', 'other'), ("python3 - <<'EOF'\nimport pytest\nEOF", 'other'),
+                          ('python -c "import subprocess; subprocess.run([\'pytest\'])"', 'other')):
+            self.assertEqual(C.check_kind(cmd), kind, cmd)
+
+
+class Edits(unittest.TestCase):
+    """What counts as changing the code after the check."""
+
+    def test_a_failed_or_rejected_edit_changes_nothing(self):
+        self.assertIsNone(C.judge(turn(edit(), bash('pytest', '5 passed'), edit(error=True), say('Fixed.'))))
+        tested = turn(edit(), bash('pytest', '5 passed'), say('5 passed.'))
+        self.assertIsNone(session(tested, later('Done.', edit(error=True))))
+
+    def test_a_shell_edit_after_the_check_blocks(self):
+        diff = {'bashEditDiff': {'files': [{'filePath': '/repo/app.py', 'hunks': []}]}}
+        v = C.judge(turn(edit(), bash('pytest', '5 passed'), bash("sed -i '' 's/a/b/' app.py", extra=diff),
+                         say('All 5 tests pass.')))
+        self.assertIn('nothing ran successfully after the last edit', v[2])
+        self.assertIsNone(C.judge(turn(edit(), bash("sed -i '' 's/a/b/' app.py", extra=diff), bash('pytest', '5 passed'),
+                                       say('All 5 tests pass.'))))
+
+    def test_files_changed_by_git_or_another_process_are_not_your_edit(self):
+        diff = {'bashEditDiff': {'files': [{'filePath': '/repo/app.py', 'hunks': []}]}}
+        for cmd in ('git pull --rebase', 'git fetch -q && git merge --ff-only origin/main && echo ok > /tmp/x', 'sleep 30'):
+            self.assertIsNone(C.judge(turn(edit(), bash('pytest', '5 passed'), bash(cmd, extra=diff), say('Fixed.'))), cmd)
+
+    def test_a_script_writing_data_files_is_not_a_code_edit(self):
+        diff = {'bashEditDiff': {'files': [{'filePath': '/repo/ledger.json', 'hunks': []},
+                                           {'filePath': '/repo/NOTES.md', 'hunks': []}]}}
+        self.assertIsNone(C.judge(turn(edit(), bash('pytest', '5 passed'), bash('python3 log_run.py > ledger.json', extra=diff),
+                                       say('Fixed.'))))
+
+    def test_without_claude_codes_record_a_shell_edit_is_not_seen(self):
+        # Documented blind spot: no bashEditDiff (older Claude Code, untracked file) means sed -i still counts as a run.
+        self.assertIsNone(C.judge(turn(edit(), bash("sed -i '' 's/a/b/' app.py"), say('Fixed.'))))
+
+
+class SessionTimeline(unittest.TestCase):
+    """Acceptance cases: a check in an earlier turn, an edit after it, a failed check, no check at all."""
+
+    def test_a_valid_check_in_an_earlier_turn_counts(self):
+        tested = turn(edit(), bash('pytest', '14 passed'), say('14 passed.'))
+        looked = later('It is in config.toml.', tool('Read', file_path='/repo/config.toml'))
+        self.assertIsNone(session(tested, looked, later('Everything is fixed.')))
+
+    def test_an_edit_after_the_check_needs_a_new_check(self):
+        tested = turn(edit(), bash('pytest', '14 passed'), say('14 passed.'))
+        v = session(tested, later('Renamed it.', edit()), later('Everything is fixed.'))
+        self.assertIn('nothing ran in this turn', v[2])
+        self.assertIsNone(session(tested, later('Renamed it.', edit()), later('Everything is fixed.', bash('pytest', '14 passed'))))
+
+    def test_a_failed_check_in_an_earlier_turn_blocks_the_wrap_up(self):
+        failed = turn(edit(), bash('pytest', PYTEST_FAIL, error=True), say('One test fails.'))
+        v = session(failed, later('All done.'))
+        self.assertEqual(v[0], 'done')
+        self.assertIn('exited with code 1', v[2])
+
+    def test_no_check_at_all_blocks(self):
+        v = session(turn(edit(), say('Changed it.')), later('It is fixed.'))
+        self.assertEqual(v[0], 'done')
+
+    def test_check_reads_the_whole_transcript(self):
+        tested = turn(edit(), bash('pytest', '14 passed'), say('14 passed.'))
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, 't.jsonl')
+            with open(path, 'w') as f:
+                f.write('\n'.join(json.dumps(e) for e in tested + later('All fixed.')) + '\n')
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                self.assertEqual(C.check(path), 0)
+
+
+class FixNotes(unittest.TestCase):
+    """Red then green, and checks that may not have loaded the change: notes, never blocks."""
+
+    def notes(self, t, claim=None):
+        ev = C.Evidence()
+        ev.feed_turn(t)
+        self.assertIsNone(C.verdict(ev, t), 'a note case must not be a block')
+        return [k for k, _ in C.notes(ev, claim or C.done_claim(t))]
+
+    def test_red_then_green_has_no_note(self):
+        t = turn(bash('pytest tests/test_bug.py', PYTEST_FAIL, error=True), edit(),
+                 bash('pytest tests/test_bug.py -q', '1 passed'), say('The bug is fixed.'))
+        self.assertEqual(self.notes(t), [])
+        t = turn(bash('python -m pytest tests/test_bug.py::test_x', PYTEST_FAIL, error=True), edit(),
+                 bash('pytest', '40 passed'), say('The bug is fixed.'))
+        self.assertEqual(self.notes(t), [])
+
+    def test_green_without_red_is_a_note_not_a_block(self):
+        t = turn(edit(), bash('pytest', '5 passed'), say('The bug is fixed.'))
+        self.assertEqual(self.notes(t), ['no-red'])
+        self.assertEqual(self.notes(turn(edit(), bash('pytest', '5 passed'), say('It is deployed.'))), [])
+        # Red from other tests doesn't count as reproducing this bug.
+        t = turn(bash('pytest tests/test_a.py', PYTEST_FAIL, error=True), edit(),
+                 bash('pytest tests/test_b.py', '3 passed'), say('The bug is fixed.'))
+        self.assertEqual(self.notes(t), ['no-red'])
+
+    def project(self):
+        d = tempfile.mkdtemp()
+        os.makedirs(os.path.join(d, '.git'))
+        os.makedirs(os.path.join(d, 'tests'))
+        os.makedirs(os.path.join(d, 'src'))
+        with open(os.path.join(d, 'src', 'billing.py'), 'w') as f:
+            f.write('def charge(): pass\n')
+        return d
+
+    def at(self, cwd, entries):
+        for e in entries:
+            e['cwd'] = cwd
+        return entries
+
+    def test_a_run_meant_to_fail_still_counts_as_the_red(self):
+        t = turn(bash('pytest tests/test_bug.py  # should fail before the fix', PYTEST_FAIL, error=True), edit(),
+                 bash('pytest tests/test_bug.py', '1 passed'), say('The bug is fixed.'))
+        self.assertEqual(self.notes(t), [])
+
+    def test_a_note_comes_with_the_turn_that_did_the_work_not_every_wrap_up(self):
+        worked = turn(edit(), bash('pytest', '5 passed'), say('The bug is fixed.'))
+        self.assertEqual(self.notes(worked), ['no-red'])
+        ev = C.Evidence()
+        ev.feed_turn(worked)
+        wrap = later('Everything is fixed.')
+        ev.feed_turn(wrap)
+        self.assertIsNone(C.verdict(ev, wrap))
+        self.assertEqual(C.notes(ev, C.done_claim(wrap)), [])
+
+    def test_tests_that_never_mention_the_changed_file(self):
+        d = self.project()
+        with open(os.path.join(d, 'tests', 'test_auth.py'), 'w') as f:
+            f.write('import auth\n')
+        with open(os.path.join(d, 'tests', 'test_billing.py'), 'w') as f:
+            f.write('from src.billing import charge\n')
+        changed = os.path.join(d, 'src', 'billing.py')
+        t = turn(edit(changed), self.at(d, bash('pytest tests/test_auth.py', '3 passed')), say('Deployed.'))
+        self.assertEqual(self.notes(t), ['not-loaded'])
+        t = turn(edit(changed), self.at(d, bash('pytest tests/test_billing.py', '3 passed')), say('Deployed.'))
+        self.assertEqual(self.notes(t), [])
+        # The whole suite, or tests picked by name: it can't tell what they load, so it says nothing.
+        for cmd in ('pytest', 'pytest -k charge'):
+            t = turn(edit(changed), self.at(d, bash(cmd, '3 passed')), say('Deployed.'))
+            self.assertEqual(self.notes(t), [], cmd)
+
+    def test_a_check_in_another_project(self):
+        a, b = self.project(), self.project()
+        t = turn(edit(os.path.join(a, 'src', 'billing.py')), self.at(a, bash(f'cd {b} && pytest', '3 passed')),
+                 say('Deployed.'))
+        self.assertEqual(self.notes(t), ['elsewhere'])
+        t = turn(edit(os.path.join(a, 'src', 'billing.py')), self.at(a, bash('cd tests && pytest', '3 passed')),
+                 say('Deployed.'))
+        self.assertEqual(self.notes(t), [])
+
+    def test_a_build_output_run_without_a_rebuild(self):
+        t = turn(edit('/repo/src/app.ts'), bash('node dist/app.js --selftest'), say('Deployed.'))
+        self.assertEqual(self.notes(t), ['stale-build'])
+        t = turn(edit('/repo/src/app.ts'), bash('npm run build'), bash('node dist/app.js --selftest'), say('Deployed.'))
+        self.assertEqual(self.notes(t), [])
+
+    def test_coverage_showing_the_changed_file_at_zero(self):
+        out = 'Name               Stmts   Miss  Cover\nsrc/billing.py        10     10     0%\nTOTAL   10 10 0%\n3 passed'
+        t = turn(edit('/repo/src/billing.py'), bash('pytest --cov=src', out), say('Deployed.'))
+        self.assertEqual(self.notes(t), ['coverage-0'])
+
+
+class HookNotesAndLag(unittest.TestCase):
+    _ENV = Hook._ENV
+    setUp, tearDown, run_hook, write_options = Hook.setUp, Hook.tearDown, Hook.run_hook, Hook.write_options
+
+    def test_a_note_is_shown_to_you_and_does_not_send_the_agent_back(self):
+        code, out, log = self.run_hook(turn(edit(), bash('pytest', '5 passed'), say('The bug is fixed.')))
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertNotIn('hookSpecificOutput', data)
+        self.assertIn('no run of them failed before it', data['systemMessage'])
+        with open(log) as f:
+            self.assertEqual(json.loads(f.readline())['kind'], 'note')
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            C.main(['claim_check.py', 'report', '--log', log])
+        self.assertIn('1 note shown', buf.getvalue())
+        self.assertIn('No blocks logged yet', buf.getvalue())
+
+    def test_notes_can_be_turned_off(self):
+        self.write_options('claim-check@claim-check', notes=False)
+        _, out, log = self.run_hook(turn(edit(), bash('pytest', '5 passed'), say('The bug is fixed.')))
+        self.assertEqual(out, '')
+        self.assertFalse(os.path.exists(log))
+
+    def test_no_claim_means_no_transcript_read(self):
+        _, out, _ = self.run_hook([], transcript_path='/nope.jsonl', last_assistant_message='Here is the plan.')
+        self.assertEqual(out, '')
+
+    def test_it_waits_for_a_transcript_that_is_behind(self):
+        import threading
+        head = turn(edit())
+        tail = bash('pytest', '5 passed') + [say('All 5 tests pass.')]
+        d = tempfile.mkdtemp()
+        path = os.path.join(d, 't.jsonl')
+        with open(path, 'w') as f:
+            f.write('\n'.join(json.dumps(e) for e in head) + '\n')
+
+        def catch_up():
+            with open(path, 'a') as f:
+                f.write('\n'.join(json.dumps(e) for e in tail) + '\n')
+        timer = threading.Timer(0.3, catch_up)
+        timer.start()
+        try:
+            _, out, _ = self.run_hook([], transcript_path=path, last_assistant_message='All 5 tests pass.')
+        finally:
+            timer.join()
+        self.assertEqual(out, '')
+        # If it never catches up, it judges what's there.
+        _, out, _ = self.run_hook(head, last_assistant_message='All 5 tests pass.')
+        self.assertIn('claim-check:', json.loads(out)['hookSpecificOutput']['additionalContext'])
+
+
+class ReplayScope(unittest.TestCase):
+    def test_replay_skips_subagent_transcripts(self):
+        blocked = [dict(you('fix it'), uuid='u1')] + edit() + [say('Fixed.')]
+        sub = [dict(you('review the diff'), uuid='u2', isSidechain=True), say('All checks are done.')]
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, 'p', 's1', 'subagents'))
+            with open(os.path.join(d, 'p', 's1.jsonl'), 'w') as f:
+                f.write('\n'.join(json.dumps(e) for e in blocked))
+            with open(os.path.join(d, 'p', 's1', 'subagents', 'agent-1.jsonl'), 'w') as f:
+                f.write('\n'.join(json.dumps(e) for e in sub))
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                C.replay(d)
+        out = buf.getvalue()
+        self.assertIn('1 transcript, 1 turn; 1 subagent transcript skipped', out)
+        self.assertIn('1 turn ends with the claim; 1 has no proof', out)
+
+
 if __name__ == '__main__':
     unittest.main()
