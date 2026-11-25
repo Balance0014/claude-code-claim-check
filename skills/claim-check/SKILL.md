@@ -18,7 +18,7 @@ Two kinds of sentence cause most of the damage when they are wrong: "it's fixed"
 
 ## Before you say a bug is fixed
 
-1. Show the same test failing before the fix and passing after. If you only have the passing run, say so.
+1. Show the same test failing before the fix and passing after. If you wrote the test after the fix, show it failing on the old code (`git stash`, run it, `git stash pop`), and mark a run you expect to fail with a comment such as `# should fail on the old code`. If you only have the passing run, say so.
 2. Run the tests that load the code you changed, not an unrelated file that happens to be green. If you can't tell whether they reach the change, say that.
 
 ## Before you say something doesn't exist or isn't used
@@ -39,4 +39,4 @@ A workaround that stops the symptom is fine. Call it a workaround, not a fix.
 
 ## If a hook blocked you
 
-The claim-check hook found a claim without proof. If the last test or build failed, make it pass or say what still fails. Otherwise run the check and show the result, cite proof you already have (a commit hash, a line like "14 passed" or "HTTP 200") if you changed no code this turn, or rewrite the sentence as "not verified yet". Do one of these before you stop again.
+The claim-check hook found a claim without proof. If the last test or build failed, make it pass or say what still fails. Otherwise run the check and show the result, or rewrite the sentence as "not verified yet". Citing proof you already have (a commit hash, a line like "14 passed" or "HTTP 200") only works when no code was edited in this session: after an edit, only a check that passes after it counts. Do one of these before you stop again.

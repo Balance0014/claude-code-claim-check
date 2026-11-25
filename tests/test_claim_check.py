@@ -302,6 +302,19 @@ class Turns(unittest.TestCase):
             f.write('123\n"text"\n[]\n' + json.dumps(you('hi')) + '\n')
         self.assertEqual(len(C.load(p)), 1)
 
+    def test_a_half_written_line_is_read_once_it_is_finished(self):
+        p = os.path.join(tempfile.mkdtemp(), 't.jsonl')
+        line = json.dumps(you('hi'))
+        with open(p, 'w') as f:
+            f.write(json.dumps(you('first')) + '\n' + line[:10])
+        got, pos = C.read_from(p)
+        self.assertEqual(len(got), 1)
+        with open(p, 'a') as f:
+            f.write(line[10:] + '\n')
+        more, end = C.read_from(p, pos)
+        self.assertEqual([C._text(e) for e in more], ['hi'])
+        self.assertEqual(C.read_from(p, end), ([], end))
+
 
 class Hook(unittest.TestCase):
     _ENV = ('CLAUDE_PLUGIN_DATA', 'CLAUDE_PLUGIN_ROOT', 'CLAUDE_CONFIG_DIR', 'CLAIM_CHECK_OFF',
@@ -671,7 +684,7 @@ class EarlierTurns(unittest.TestCase):
         edited = [you('rename the helper')] + tool('Edit', file_path='app.py') + [say('Renamed it.')]
         code, out = self.verdict(tested, edited, self.wrap_up())
         self.assertEqual(code, 1)
-        self.assertIn('nothing ran in this turn', out)
+        self.assertIn('made in an earlier turn', out)
 
     def test_a_failed_or_read_only_run_earlier_does_not_count(self):
         failed = turn(tool('Edit', file_path='app.py'), tool('Bash', error=True, command='pytest'), say('Tests fail.'))
@@ -729,7 +742,7 @@ class ReplayCounts(unittest.TestCase):
         self.assertIn('2 turns (1 copy from resumed sessions skipped)', out)
         self.assertIn('2 turns end with the claim; 2 have no proof', out)
         self.assertIn('1  nothing ran successfully after the last code edit', out)
-        self.assertIn('1  no tool calls in the turn', out)
+        self.assertIn('1  a wrap-up: code edited in an earlier turn', out)
 
 
 
@@ -870,10 +883,23 @@ class Outcomes(unittest.TestCase):
         self.assertIsNone(C.judge(turn(edit(), bash('pytest', PYTEST_FAIL, error=True), bash('pytest', '5 passed'),
                                        say('Fixed.'))))
 
-    def test_red_then_green_in_one_command_is_green(self):
+    def test_red_then_green_in_one_command_is_green_only_when_it_says_so(self):
         out = 'FAILED (failures=1)\n' + '-' * 20 + '\nRan 3 tests in 0.1s\n\nOK'
-        self.assertIsNone(C.judge(turn(edit(), bash('python -m unittest t_old; python -m unittest t_new', out),
+        # Unmarked, it looks the same as one suite failing and the next passing, so the failure counts.
+        self.assertIsNotNone(C.judge(turn(edit(), bash('python -m unittest t_old; python -m unittest t_new', out),
+                                          say('Fixed.'))))
+        self.assertIsNone(C.judge(turn(edit(), bash('python -m unittest t_old; python -m unittest t_new  # t_old should fail', out),
                                        say('Fixed.'))))
+        self.assertIsNone(C.judge(turn(edit(), bash('git stash && python -m unittest t; git stash pop && python -m unittest t', out),
+                                       say('Fixed.'))))
+        # The same test twice, the old file swapped in first: red, then green (seen in a real session).
+        for cmd in ('git show HEAD~1:app.py > /tmp/x/app.py && cd /tmp/x && python -m unittest test_app; cp ~/r/app.py /tmp/x/ && python -m unittest test_app',
+                    'python -m unittest test_app.T.test_x; cp new.py app.py && python -m unittest test_app.T.test_x'):
+            t = turn(edit(), bash(cmd, out), say('Fixed.'))
+            self.assertIsNone(C.judge(t), cmd)
+            ev = C.Evidence()
+            ev.feed_turn(t)
+            self.assertTrue(C.red_then_green(ev, ev.last_edit()), cmd)
 
     def test_another_step_failing_is_not_a_test_failure(self):
         # pytest passed, git push failed: the push is not a failing check, and curl still proves something.
@@ -945,7 +971,7 @@ class SessionTimeline(unittest.TestCase):
     def test_an_edit_after_the_check_needs_a_new_check(self):
         tested = turn(edit(), bash('pytest', '14 passed'), say('14 passed.'))
         v = session(tested, later('Renamed it.', edit()), later('Everything is fixed.'))
-        self.assertIn('nothing ran in this turn', v[2])
+        self.assertIn('made in an earlier turn', v[2])
         self.assertIsNone(session(tested, later('Renamed it.', edit()), later('Everything is fixed.', bash('pytest', '14 passed'))))
 
     def test_a_failed_check_in_an_earlier_turn_blocks_the_wrap_up(self):
@@ -1129,6 +1155,158 @@ class ReplayScope(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn('1 transcript, 1 turn; 1 subagent transcript skipped', out)
         self.assertIn('1 turn ends with the claim; 1 has no proof', out)
+
+
+
+class AcceptanceReview(unittest.TestCase):
+    """Problems an independent review of 0.6.0 found, each reproduced before the fix."""
+
+    def test_saying_what_still_fails_passes_even_when_that_test_is_the_only_run(self):
+        for reply in ('The parser is fixed; the remaining failure is pre-existing.',
+                      '解析器已修复,还有 1 个测试失败,是原有问题。'):
+            self.assertIsNone(C.judge(turn(edit(), bash('pytest', PYTEST_FAIL, error=True), say(reply))), reply)
+            failed = turn(edit(), bash('pytest', PYTEST_FAIL, error=True), say('One test fails.'))
+            self.assertIsNone(session(failed, later(reply)), reply)
+
+    def test_everyday_words_dont_excuse_a_failing_test(self):
+        for reply in ('已修复,保留了原有接口。', '已修复登录问题,和缓存模块无关。',
+                      'The login bug is fixed; I also removed an unrelated import.',
+                      'Fixed. Handled the 3 errors the parser used to swallow.'):
+            self.assertIsNotNone(C.judge(turn(edit(), bash('pytest', PYTEST_FAIL, error=True), bash('python app.py --help'),
+                                              say(reply))), reply)
+
+    def test_a_lint_warning_after_green_tests_doesnt_block(self):
+        for cmd in ('pylint app.py', 'flake8 .', 'npm run lint', 'ruff check .', 'mypy src'):
+            self.assertIsNone(C.judge(turn(edit(), bash('pytest', '14 passed'), bash(cmd, 'Exit code 1\napp.py:3: W0611', error=True),
+                                           say('All 14 tests pass.'))), cmd)
+        # A failing lint is still not proof on its own.
+        self.assertIsNotNone(C.judge(turn(edit(), bash('flake8 .', 'Exit code 1', error=True), say('Fixed.'))))
+
+    def test_red_on_the_old_code_after_the_fix_counts_as_the_red(self):
+        old = bash('git stash && pytest tests/test_bug.py -q; git stash pop',
+                   'FAILED tests/test_bug.py::test_login - AssertionError\n1 failed, 1 passed in 0.1s\nDropped refs/stash@{0}')
+        t = turn(edit(), bash('pytest tests/test_bug.py -q', '2 passed in 0.1s'), old, say('The login bug is fixed.'))
+        self.assertIsNone(C.judge(t))
+        ev = C.Evidence()
+        ev.feed_turn(t)
+        self.assertTrue(C.red_then_green(ev, ev.last_edit()))
+        self.assertEqual(C.notes(ev, C.done_claim(t)), [])
+
+    def test_a_failing_suite_isnt_hidden_by_the_next_one_passing(self):
+        fail_then_pass = PYTEST_FAIL.split('\n', 1)[1] + '\n=== 9 passed in 0.5s ==='
+        for cmd, out in (('pytest tests/unit -q; pytest tests/integration -q', fail_then_pass),
+                         ('for t in tests.test_a tests.test_b; do python3 -m unittest $t; done',
+                          'FAILED (failures=1)\nRan 4 tests in 0.1s\n\nOK'),
+                         ('cd backend && pytest -q; cd ../web && npm test', fail_then_pass)):
+            self.assertIsNotNone(C.judge(turn(edit(), bash(cmd, out), say('All tests pass.'))), cmd)
+
+    def test_test_names_dont_mark_a_run_as_meant_to_fail(self):
+        for cmd in ('pytest tests/test_graphql_mutations.py', 'npx jest src/graphql/mutations.test.ts',
+                    'pytest tests/ -k "deliberately_bad_input"'):
+            self.assertIsNotNone(C.judge(turn(edit(), bash(cmd, PYTEST_FAIL, error=True), bash('python app.py --help'),
+                                              say('Fixed.'))), cmd)
+        self.assertFalse(C.expects_fail('pytest tests/test_mutations.py'))
+        self.assertTrue(C.expects_fail('pytest tests/test_bug.py  # should fail before the fix'))
+        self.assertTrue(C.expects_fail('echo "expect red"; pytest tests/test_bug.py; echo "this must fail"'))
+
+    def test_more_ways_to_run_tests_are_recognized(self):
+        for cmd in ('pnpm exec playwright test', 'python manage.py test', 'bundle exec rspec', 'make -C build test',
+                    'uv run --frozen pytest', 'docker compose exec app pytest', 'bash -c "cd repo && pytest"',
+                    'if pytest -q; then echo ok; fi', 'yarn jest', 'pnpm vitest run', 'pnpm --filter web test',
+                    'npm --prefix web test', 'npm test -- --watchAll=false', 'npm test -w pkg'):
+            self.assertEqual(C.check_kind(cmd), 'test', cmd)
+        self.assertEqual(C.check_kind('vitest -w'), 'other')
+        self.assertEqual(C.check_kind('npx jest --watch'), 'other')
+        self.assertIsNotNone(C.judge(turn(edit(), bash('npm test -- --watchAll=false | tail -5', 'Tests:       1 failed, 3 passed, 4 total'),
+                                          say('Fixed.'))))
+        self.assertIsNotNone(C.judge(turn(edit(), bash('yarn jest', 'Exit code 1\nTests: 1 failed, 3 passed, 4 total', error=True),
+                                          bash('node app.js --version', 'v1'), say('Fixed.'))))
+
+    def test_an_mcp_tool_that_writes_a_file_is_an_edit(self):
+        self.assertIsNotNone(C.judge(turn(edit(), bash('pytest', '5 passed'),
+                                          tool('mcp__filesystem__write_file', path='/repo/app.py', content='x'),
+                                          say('All 5 tests pass.'))))
+        self.assertIsNotNone(C.judge(turn(tool('mcp__filesystem__edit_file', path='/repo/app.py', edits=[]), say('Fixed.'))))
+        self.assertIsNone(C.judge(turn(edit(), bash('pytest', '5 passed'), tool('mcp__browser__read_page', url='http://localhost'),
+                                       say('All 5 tests pass.'))))
+
+    def test_the_apps_own_bookkeeping_tools_are_not_checks(self):
+        for name in ('mcp__ccd_turn__wrap_up', 'mcp__ccd_turn__update_plan', 'mcp__todo__write_todos'):
+            v = C.judge(turn(edit(), tool(name, recap='done'), say('Fixed.')))
+            self.assertIsNotNone(v, name)
+
+    def test_a_code_edit_with_nothing_run_after_it_cant_be_talked_past(self):
+        edited = turn(edit(), say('I changed the handler.'))
+        self.assertIsNotNone(session(edited, later('It is fixed: 14 tests passed.')))
+        self.assertIsNotNone(session(edited, later('Everything is fixed.', tool('Edit', file_path='/repo/CHANGELOG.md'))))
+        tested = turn(edit(), bash('pytest', '14 passed'), say('14 passed.'))
+        self.assertIsNotNone(session(tested, later('Renamed it.', edit()), later('All fixed, 14 passed.')))
+        # With no code edits at all, cited proof still works.
+        self.assertIsNone(session(turn(say('Looked around.')), later('Deployed in a1b2c3d, HTTP 200.')))
+
+    def test_a_shell_command_that_edits_and_runs_is_read_in_order(self):
+        diff = {'bashEditDiff': {'files': [{'filePath': '/repo/app.py', 'hunks': []}]}}
+        self.assertIsNone(C.judge(turn(bash("sed -i '' 's/a/b/' app.py && python app.py --selftest", 'selftest ok', extra=diff),
+                                       say('Fixed.'))))
+        self.assertIsNotNone(C.judge(turn(edit(), bash("pytest -q && sed -i '' 's/a/b/' app.py", '5 passed in 0.1s', extra=diff),
+                                          say('All 5 tests pass.'))))
+        # Writing, then only staging it, is still an edit with nothing run after it.
+        self.assertIsNotNone(C.judge(turn(bash("sed -i '' 's/a/b/' app.py && git add app.py", '', extra=diff), say('Fixed.'))))
+
+    def test_installing_packages_is_not_a_code_edit(self):
+        diff = {'bashEditDiff': {'files': [{'filePath': '/repo/node_modules/x/index.js', 'hunks': []}]}}
+        for cmd in ('npm install', 'pip install -e .'):
+            self.assertIsNone(C.judge(turn(edit(), bash('pytest', '5 passed'), bash(cmd, 'added 3 packages', extra=diff),
+                                           say('All 5 tests pass.'))), cmd)
+
+    def test_notes_dont_guess_about_folders_or_package_imports(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__('shutil').rmtree(d, ignore_errors=True))
+        os.makedirs(os.path.join(d, '.git'))
+        os.makedirs(os.path.join(d, 'tests'))
+        os.makedirs(os.path.join(d, 'src'))
+        with open(os.path.join(d, 'tests', 'test_pay.py'), 'w') as f:
+            f.write('from src import charge\n')
+        with open(os.path.join(d, 'tests', 'test_cli.py'), 'w') as f:
+            f.write('import subprocess  # runs the command line\n')
+        with open(os.path.join(d, 'src', '__init__.py'), 'w') as f:
+            f.write('from .billing import charge\n')
+        changed = os.path.join(d, 'src', 'billing.py')
+        with open(changed, 'w') as f:
+            f.write('def charge(): pass\n')
+
+        def notes(cmd):
+            b = bash(cmd, '3 passed in 0.1s')
+            b[0]['cwd'] = d
+            t = turn(edit(changed), b, say('Deployed.'))
+            ev = C.Evidence()
+            ev.feed_turn(t)
+            return [k for k, _ in C.notes(ev, C.done_claim(t))]
+        self.assertEqual(notes('pytest tests/'), [])
+        self.assertEqual(notes('pytest tests/test_pay.py'), [])
+        # A test that never mentions billing or its package still gets the note.
+        self.assertEqual(notes('pytest tests/test_cli.py'), ['not-loaded'])
+
+    def test_a_red_from_an_earlier_task_doesnt_count_for_this_fix(self):
+        ev = C.Evidence()
+        ev.feed_turn(turn(bash('pytest', PYTEST_FAIL, error=True), edit('/repo/old.py'), bash('pytest', '5 passed'),
+                          say('The old bug is fixed.')))
+        new = later('The new bug is fixed.', edit('/repo/new.py'), bash('pytest', '5 passed'))
+        ev.feed_turn(new)
+        self.assertIsNone(C.verdict(ev, new))
+        self.assertEqual([k for k, _ in C.notes(ev, C.done_claim(new))], ['no-red'])
+
+    def test_the_hook_and_replay_both_skip_a_subagents_inline_steps(self):
+        side = lambda es: [dict(e, isSidechain=True) for e in es]
+        t = ([dict(you('fix the login bug'), uuid='u1')] + edit() + bash('pytest', '5 passed')
+             + side([you('review app.py and tidy it')] + edit('/repo/app.py') + [say('Tidied.')])
+             + [say('The login bug is fixed; 5 passed.')])
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, 's.jsonl')
+            with open(p, 'w') as f:
+                f.write('\n'.join(json.dumps(e) for e in t) + '\n')
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(C.check(p), 0)
 
 
 if __name__ == '__main__':

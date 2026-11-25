@@ -65,12 +65,26 @@ STOP_TOOLS = {'KillShell', 'KillBash', 'TaskStop'}
 LOOKUP_TOOLS = READ_TOOLS | RUN_TOOLS | {'WebSearch', 'NotebookRead'}
 
 
+# MCP tools that only keep the session's books (Claude Code desktop's task list and wrap-up, to-do lists).
+# They run after the work, so counting them as a check would let every unverified edit through.
+BOOKKEEPING = re.compile(r'^mcp__ccd_|(?:^|_)(?:todos?|update_plan|wrap_up|mark_chapter)(?:_|$)', re.I)
+# An MCP tool that writes a file (a filesystem server's write_file or edit_file): an edit, not a check.
+MCP_WRITE = re.compile(r'(?:^|_)(?:write|edit|replace|patch|insert|append|create)(?:_|$)', re.I)
+
+
 def runs(name):
-    return name in RUN_TOOLS or name.startswith('mcp__')
+    return name in RUN_TOOLS or (name.startswith('mcp__') and not BOOKKEEPING.search(name))
 
 
 def looks(name):
-    return name in LOOKUP_TOOLS or name.startswith('mcp__')
+    return name in LOOKUP_TOOLS or (name.startswith('mcp__') and not BOOKKEEPING.search(name))
+
+
+def mcp_write_path(name, inp):
+    """The file an MCP tool writes, or '' if it doesn't look like a file write."""
+    if not name.startswith('mcp__') or not MCP_WRITE.search(name.rsplit('__', 1)[-1]):
+        return ''
+    return str(inp.get('path') or inp.get('file_path') or inp.get('filePath') or inp.get('filename') or '')
 # Updating notes or docs after a check doesn't undo the check.
 DOC_FILE = re.compile(r'\.(?:md|markdown|rst|adoc)$', re.I)
 # Shell commands that only look at things: a lookup, never proof. Chained or piped, every part has to be one.
@@ -158,17 +172,26 @@ def is_human(entry):
     return isinstance(c, str) or any(isinstance(i, dict) and i.get('type') == 'text' for i in c or [])
 
 
-def load(path):
+def read_from(path, pos=0):
+    """The entries from byte `pos` on, and where the next read starts. A half-written last line waits."""
     out = []
-    with open(path, encoding='utf-8', errors='replace') as f:
+    with open(path, 'rb') as f:
+        f.seek(pos)
         for line in f:
             try:
-                e = json.loads(line)
+                e = json.loads(line.decode('utf-8', errors='replace'))
             except ValueError:
-                continue
+                if not line.endswith(b'\n'):
+                    break               # still being written: read it next time
+                e = None
+            pos += len(line)
             if isinstance(e, dict):
                 out.append(e)
-    return out
+    return out, pos
+
+
+def load(path):
+    return read_from(path)[0]
 
 
 def turns(entries):
@@ -232,6 +255,8 @@ def parse(turn):
 # what is there and falls back to the plain is_error flag when a field is missing.
 
 # Tests and builds are checks whose result can be read from their own summary line, not only the exit code.
+# Linters and type checkers (eslint, ruff, flake8, pylint, mypy, go vet) are ordinary commands: they exit
+# non-zero on any warning, and a lint warning after green tests doesn't make "the tests pass" false.
 # Each pattern is matched at the start of one step of a command (after `cd …;`, `X=1`, `npx`, `uv run`),
 # so `git add test_x.py` or a heredoc that mentions pytest is not a test run.
 TEST_CMD = re.compile(r"""(?ix)^(?:
@@ -242,30 +267,37 @@ TEST_CMD = re.compile(r"""(?ix)^(?:
   | (?:\./)?(?:\S*/)?(?:run_?tests?|tests?)\.sh\b
   | (?:go|cargo|swift|dotnet|mix|deno|bun|flutter|dart|zig)\s+test\b
   | node\s+--test\b
-  | (?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test(?::[\w:-]+)?(?![\w-])
+  | (?:npm|pnpm|yarn|bun)\s+(?:(?:--filter|-F|--prefix|-C|--dir|--cwd|-w|--workspace)(?:=|\s+)\S+\s+|--?[\w-]+\s+)*(?:run\s+)?test(?::[\w:-]+)?(?![\w-])
+  | python\d?(?:\.\d+)?\s+(?:-\S+\s+)*(?:\S*/)?manage\.py\s+test\b
   | (?:playwright\s+test|cypress\s+run)\b
   | (?:\./)?(?:mvnw?|gradlew?)\b.*\b(?:test|check|verify)\b
-  | make\s+(?:-\S+\s+)*(?:test|tests|check)\b
+  | make\s+(?:(?:-C|-f|--directory|--file)(?:=|\s+)\S+\s+|-\S+\s+)*(?:test|tests|check)\b
 )""")
 BUILD_CMD = re.compile(r"""(?ix)^(?:
-    (?:\S*/)?(?:tsc|webpack|esbuild|rollup|xcodebuild|msbuild|ninja|mypy|pyright|flake8|eslint|pylint|swiftc|javac|rustc)(?![\w-])
-  | (?:vite|next|nuxt|astro|turbo)\s+build\b | ruff\s+check\b
-  | (?:go|cargo|swift|dotnet|bazel)\s+(?:build|check|vet)\b
-  | (?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:build|typecheck|type-check|lint|compile|check)(?![\w:-])
+    (?:\S*/)?(?:tsc|webpack|esbuild|rollup|xcodebuild|msbuild|ninja|swiftc|javac|rustc)(?![\w-])
+  | (?:vite|next|nuxt|astro|turbo)\s+build\b
+  | (?:go|cargo|swift|dotnet|bazel)\s+(?:build|check)\b
+  | (?:npm|pnpm|yarn|bun)\s+(?:(?:--filter|-F|--prefix|-C|--dir|--cwd|-w|--workspace)(?:=|\s+)\S+\s+)*(?:run\s+)?(?:build|typecheck|type-check|compile)(?![\w:-])
   | (?:\./)?(?:mvnw?|gradlew?)\b.*\b(?:compile|package|build|assemble)\b
-  | make(?:\s+-\S+)*(?:\s+(?:all|build|compile|lint))?\s*$
-  | python\d?(?:\.\d+)?\s+(?:-\S+\s+)*-m\s+(?:py_compile|compileall|mypy|ruff|flake8|pylint)\b | node\s+--check\b | bash\s+-n\b
+  | make(?:\s+(?:(?:-C|-f|--directory|--file)(?:=|\s+)\S+|-\S+))*(?:\s+(?:all|build|compile))?\s*$
+  | python\d?(?:\.\d+)?\s+(?:-\S+\s+)*-m\s+(?:py_compile|compileall)\b | node\s+--check\b | bash\s+-n\b
 )""")
-WATCH = re.compile(r'--watch(?:All)?\b|(?<![\w-])-w(?![\w-])')          # a watcher never finishes; not a check
+# A watcher never finishes, so it's not a check. `--watchAll=false` turns it off; `npm test -w pkg` is a workspace.
+WATCH = re.compile(r'--watch(?:All)?(?![\w-]|=(?:false|0)\b)|^(?:\S*/)?(?:vitest|jest|mocha|tsc)\b.*(?<![\w-])-w(?![\w-])')
 _WRAP = re.compile(r'^(?:[A-Za-z_]\w*=\S*\s+|(?:env|time|nice|sudo|exec|command|npx|bunx|pnpx|xvfb-run)\s+|timeout\s+\S+\s+'
-                   r'|(?:uv|poetry|pipenv|pdm|hatch)\s+run\s+|(?:then|do|else)\s+)+')
+                   r'|(?:uv|poetry|pipenv|pdm|hatch)\s+run\s+(?:--?[\w-]+(?:=\S+)?\s+)*|bundle\s+exec\s+'
+                   r'|(?:yarn|pnpm|bun)\s+(?:exec\s+|dlx\s+)?(?=(?:jest|vitest|mocha|playwright|cypress|ava|karma|tsc)\b)'
+                   r'|docker(?:-compose|\s+compose)?\s+(?:exec|run)\s+(?:-[\w-]+\s+)*\S+\s+'
+                   r'|(?:if|elif|while|until|then|do|else)\s+|!\s+)+')
+SHELL_C = re.compile(r"""(?<![\w-])(?:ba|z)?sh\s+-\w*c\s+(['"])(.*?)\1""", re.S)    # bash -c "cd x && pytest"
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?\n\s*\2\s*(?=\n|$)", re.S)
 
 
 def _steps(command):
     """The steps of a shell command (split at ; && || and newlines), each as its first piped program.
     Heredoc bodies and quoted strings are blanked first: they are data, not commands."""
-    masked = re.sub(r"'[^']*'|\"[^\"]*\"", "''", HEREDOC.sub('<<EOF', command or ''))
+    text = SHELL_C.sub(lambda m: m.group(2), HEREDOC.sub('<<EOF', command or ''))
+    masked = re.sub(r"'[^']*'|\"[^\"]*\"", "''", text)
     out = []
     for seg in re.split(r'&&|\|\||[;\n]', masked):
         first = _WRAP.sub('', seg.split('|')[0].strip())
@@ -296,13 +328,66 @@ def _ends_with_check(command):
     return bool(steps) and _step_kind(steps[-1]) != 'other'
 
 
+def _segments(command):
+    """The steps of a shell command in order, as (text, text with quoted strings blanked). Pipes stay in."""
+    text = SHELL_C.sub(lambda m: m.group(2), HEREDOC.sub('<<EOF', command or ''))
+    masked = re.sub(r"'[^']*'|\"[^\"]*\"", lambda m: m.group(0)[0] + ' ' * (len(m.group(0)) - 2) + m.group(0)[-1], text)
+    out, start = [], 0
+    for m in list(re.finditer(r'&&|\|\||[;\n]', masked)) + [None]:
+        end = m.start() if m else len(text)
+        if text[start:end].strip():
+            out.append((text[start:end].strip(), masked[start:end].strip()))
+        start = m.end() if m else end
+    return out
+
+
+def _write_order(command):
+    """'edit_last' if the command's last step that writes files comes after the last step that runs something
+    (a test, a build, a script), 'run_last' if a run comes after it, None if no step writes."""
+    last_write = last_run = -1
+    for k, (text, masked) in enumerate(_segments(command)):
+        first = _WRAP.sub('', masked.split('|')[0].strip())
+        kind = _step_kind(first)
+        if kind == 'other' and (WRITES_SHELL.search(masked) or WRITES_CODE.search(text)):
+            last_write = k
+        elif kind != 'other' or RUNNER.match(first):
+            last_run = k
+    if last_write < 0:
+        return None
+    return 'run_last' if last_run > last_write else 'edit_last'
+
+
+def _intent(command):
+    """What a command says about itself: its # comments and what it echoes."""
+    text = HEREDOC.sub('<<EOF', command or '')
+    masked = re.sub(r"'[^']*'|\"[^\"]*\"", lambda m: 'x' * len(m.group(0)), text)
+    parts = [text[m.end():].split('\n', 1)[0] for m in re.finditer(r'(?:^|\s)#', masked)]
+    parts += re.findall(r'\b(?:echo|printf)\s+([^;&|\n]*)', text)
+    return '\n'.join(parts)
+
+
+def expects_fail(command):
+    """The command says this run should fail: a comment or an echo says so, it runs the old code, or it's a mutation tool."""
+    return bool(EXPECT_FAIL.search(_intent(command)) or OLD_CODE.search(command or '') or MUTATION.search(command or ''))
+
+
+def _reruns_a_test(command):
+    """The same test runs twice in one command (before and after swapping something in): red, then green.
+    Two different suites (`pytest tests/unit; pytest tests/integration`) are not that."""
+    keys = [check_key(s) for s in _steps(command) if _step_kind(s) == 'test']
+    keys = [k for k in keys if k]
+    return len(set(keys)) < len(keys)
+
+
 # A command that writes files. Claude Code's record of files changed during a command can also catch
 # another session or a `git pull` changing them, so a change counts as this agent's edit only if the
 # command itself writes, doesn't sync with git, and the file is source code: scripts write ledgers,
 # caches and state files (JSON, YAML, text) all the time.
-WRITES = re.compile(r"""(?x)\bsed\s+(?:-\S+\s+)*-i|\bperl\s+-\w*i|(?<![0-9&>])>>?\s*(?!/dev/null|&)[\w./~"'$-]|\btee\s
-    |(?:^|[\s;&|(])(?:cp|mv|install|ln)\s|\bpatch\s|\bgit\s+apply\b|\bwrite_(?:text|bytes)\(|\.write\(
-    |open\([^)\n]*['"][wax]\+?b?['"]|json\.dump\(|writeFileSync|fs\.(?:promises\.)?writeFile""")
+WRITES_SHELL = re.compile(r"""(?x)\bsed\s+(?:-\S+\s+)*-i|\bperl\s+-\w*i|(?<![0-9&>])>>?\s*(?!/dev/null|&)[\w./~"'$-]|\btee\s
+    |(?:^|\|\s*|\b(?:sudo|then|do|xargs)\s+)(?:cp|mv|install|ln)\s|\bpatch\s|\bgit\s+apply\b""")
+WRITES_CODE = re.compile(r"""\bwrite_(?:text|bytes)\(|\.write\(|open\([^)\n]*['"][wax]\+?b?['"]|json\.dump\(|writeFileSync|fs\.(?:promises\.)?writeFile""")
+# Running a program after writing it: an interpreter, a local script, a request. Not `git add` or `ls`.
+RUNNER = re.compile(r'^(?:python\d?(?:\.\d+)?|node|bun|deno|ruby|php|perl|go\s+run|cargo\s+run|bash|sh|zsh|\./\S+|curl|wget|http)(?:\s|$)')
 GIT_SYNC = re.compile(r'\bgit\s+(?:-C\s+\S+\s+)?(?:pull|merge|rebase|checkout|switch|reset|restore|stash|cherry-pick|revert|clone|am|worktree|submodule)\b')
 SOURCE = re.compile(r'\.(?:py|pyi|js|mjs|cjs|jsx|ts|tsx|mts|cts|go|rs|java|kt|kts|scala|swift|m|mm|c|cc|cpp|cxx|h|hpp|cs|rb|php|pl|lua|r|dart'
                     r'|ex|exs|erl|hs|clj|sh|bash|zsh|ps1|sql|html?|css|scss|sass|less|vue|svelte|astro)$', re.I)
@@ -315,8 +400,14 @@ NOT_RUN = re.compile(r"Permission (?:for|to) .{0,300}?denied|doesn't want to pro
                      r"is not recognized as an internal or external command|No module named \S*(?:pytest|unittest)|"
                      r"no test specified|Missing script", re.I)
 # Said in the command itself: this run is supposed to fail (a mutation test, the bug reproduced on the old code).
+# Matched only in the command's own `# comment` and in what it echoes, never in file or test names.
 EXPECT_FAIL = re.compile(r'expect(?:ed|s)?\s+(?:it\s+|them\s+)?(?:to\s+)?fail|should\s+fail|must\s+fail|on\s+purpose|deliberately'
                          r'|\bmutant|mutation|必红|应该?红|预期(?:失败|红)|故意|应该?失败', re.I)
+# Running the tests on the old code: stash the change (or check out the old file) first. Red there is the point.
+OLD_CODE = re.compile(r'\bgit\s+(?:-C\s+\S+\s+)?(?:stash(?:\s+(?:push|save)\b|\s*(?=&&|;|\n|\||$))|checkout\s+\S+\s+--\s'
+                      r'|restore\s+(?:-\S+\s+)*--source\b|worktree\s+add\b|show\s+\S+:\S+|apply\s+(?:-\S+\s+)*(?:-R|--reverse)\b)'
+                      r'|\bpatch\s+(?:-\S+\s+)*(?:-R|--reverse)\b')
+MUTATION = re.compile(r'(?:^|[\s;&|])(?:mutmut|stryker|mutpy|cosmic-ray|pitest)\b')
 TIMED_OUT = re.compile(r'timed out|did not complete within', re.I)
 BACKGROUND = re.compile(r'running in background with ID:\s*(\w+)|^\s*Async agent launched|moved to the background', re.I)
 # What a test or build prints when it failed, even if a pipe (`| tail`) or `|| true` turned the exit code into 0.
@@ -330,7 +421,7 @@ OUT_FAIL = re.compile(r'''(?imx)
   | ^\s*[1-9]\d*\s+failing\b                                   # mocha
   | ^---\s+FAIL:|^FAIL\s+\S                                    # go, jest
   | ^test\s+result:\s+FAILED                                   # cargo
-  | ^not\s+ok\s+\d+|^\#\s+fail\s+[1-9]                         # TAP: node --test, bats
+  | ^not\s+ok\s+\d+(?!.*\#\s*(?:TODO|SKIP))|^\#\s+fail\s+[1-9]                         # TAP: node --test, bats
   | ^error\[E\d+\]: | ^error:\s+(?:could\s+not\s+compile|aborting\s+due\s+to|linking\s+with)    # cargo, rustc
   | \berror\s+TS\d+: | ^\S+:\d+:\d+:\s+(?:fatal\s+)?error: | ^Found\s+[1-9]\d*\s+errors?\b
   | ^npm\s+ERR!|^npm\s+error\s|\bELIFECYCLE\b|^error\s+Command\s+failed
@@ -360,24 +451,29 @@ def _short(text, n=70):
     return text if len(text) <= n else text[:n - 1] + '…'
 
 
-def _summary(kind, text):
-    """'fail' or 'pass' from the last summary line a test runner or build printed, or None.
-    The last one decides: a command can run the old code (red) and then the new code (green)."""
-    found = None
-    for line in (text or '').rstrip().split('\n')[-80:]:
-        if OUT_FAIL.search(line) or (kind == 'test' and FAIL_COUNT.search(line)):
-            found = ('fail', line)
+def _summary(kind, text, last_decides=False):
+    """('fail' or 'pass', line) from the summary lines a test runner or build printed, or None.
+    A runner's failure line anywhere wins, so one failing suite of several isn't hidden by the next one
+    passing. When the command runs the old code on purpose (red, then green), the last summary decides.
+    A bare count like "3 failed" is weaker, since logs print such lines too: it decides only as the last one."""
+    strong = last = None
+    for line in (text or '').rstrip().split('\n')[-2000:]:
+        if OUT_FAIL.search(line):
+            last = ('fail', line)
+            strong = strong or last
+        elif kind == 'test' and FAIL_COUNT.search(line):
+            last = ('fail', line)
         elif SOME_TESTS.search(line):
-            found = ('pass', line)
-    return found
+            last = ('pass', line)
+    return last if last_decides else (strong or last)
 
 
-def read_output(kind, text):
+def read_output(kind, text, last_decides=False):
     """(state, why) for a command that exited 0, from what it printed: 'pass', 'fail' or 'empty' (ran no tests)."""
     lines = (text or '').rstrip().split('\n')
     tail = '\n'.join(lines[-80:])
     if kind != 'other':
-        found = _summary(kind, text)
+        found = _summary(kind, text, last_decides)
         if found and found[0] == 'fail':
             return 'fail', 'printed a failure (' + _short(found[1], 60) + ')'
         if kind == 'test' and not found and NO_TESTS.search(tail) and not SOME_TESTS.search(text):
@@ -421,6 +517,15 @@ def _read_tail(path, size=262144):
 def is_code(path):
     """An edit that can change what the code does. Docs and notes don't."""
     return bool(path) and not DOC_FILE.search(str(path))
+
+
+def _mark_expected(ev, output, expect=True):
+    """A run meant to show red. Ending red, it doesn't count as the last check. Red then green inside it is both."""
+    if ev['state'] != 'pass':
+        ev['expected'] = expect
+    else:
+        found = _summary(ev['kind'], output)
+        ev['red_inside'] = bool(found and found[0] == 'fail')
 
 
 class Evidence:
@@ -475,8 +580,8 @@ class Evidence:
         if name in POLL_TOOLS or name in STOP_TOOLS:
             self.waiting[uid] = ('poll' if name in POLL_TOOLS else 'stop', task)
             return
-        if name in EDIT_TOOLS:
-            path = str(inp.get('file_path') or inp.get('notebook_path') or '')
+        if name in EDIT_TOOLS or mcp_write_path(name, inp):
+            path = str(inp.get('file_path') or inp.get('notebook_path') or '') if name in EDIT_TOOLS else mcp_write_path(name, inp)
             ev = dict(base, k='edit', paths=[path], code=is_code(path), ok=None)
         elif runs(name):
             cmd = str(inp.get('command') or '') if name in SHELL_TOOLS else ''
@@ -503,31 +608,37 @@ class Evidence:
         if ev['k'] == 'edit':
             ev['ok'] = not err                         # a failed or rejected edit changed nothing
             return
-        if err:
-            if ev['k'] == 'run':
-                ev['state'], ev['why'] = _failed(text)
-                # `pytest; git push` exits with git's code. It's the test's failure only if the test is the
-                # last step or its own summary says so; otherwise it's just a failed command.
-                if ev['kind'] != 'other':
-                    found = _summary(ev['kind'], text)
-                    if EXPECT_FAIL.search(ev['cmd']):
-                        ev['expected'] = True          # meant to go red (a mutation test, the old code): still a red run
-                    elif found and found[0] == 'fail':
-                        ev['why'] = '%s; printed %s' % (ev['why'], _short(found[1], 50))
-                    elif found or not _ends_with_check(ev['cmd']):
-                        ev['kind'] = 'other'           # the tests passed; another step failed
-                    ev['out'] = text[-20000:]
-            return
-        # Claude Code records the files a shell command changed (sed -i, a heredoc, git checkout).
+        # Claude Code records the files a shell command changed (sed -i, a heredoc, git checkout). It's this
+        # agent's edit only if a step of the command writes, it doesn't sync with git, and the file is source code.
         diff = extra.get('bashEditDiff')
-        if (ev['name'] == 'Bash' and isinstance(diff, dict) and (ev['k'] == 'look' or ev['kind'] == 'other')
-                and WRITES.search(ev['cmd']) and not GIT_SYNC.search(ev['cmd'])):
-            paths = [str(f.get('filePath')) for f in diff.get('files') or [] if isinstance(f, dict) and f.get('filePath')]
-            source = [p for p in paths if SOURCE.search(p)]
-            if source:
+        if ev['name'] == 'Bash' and isinstance(diff, dict) and not GIT_SYNC.search(ev['cmd']):
+            source = [str(f.get('filePath')) for f in diff.get('files') or []
+                      if isinstance(f, dict) and f.get('filePath') and SOURCE.search(str(f.get('filePath')))]
+            order = _write_order(ev['cmd']) if source else None
+            if order == 'edit_last' or (order and ev['k'] == 'look'):
                 ev.update(k='edit', paths=source, code=True, ok=True, via='shell')
                 return
+            if order == 'run_last':                    # `sed -i … && pytest`: the edit, then the run that checks it
+                k = next(i for i, e in enumerate(self.events) if e is ev)
+                self.events.insert(k, {'turn': ev['turn'], 'id': None, 'name': 'Bash', 'cwd': ev['cwd'], 'k': 'edit',
+                                       'paths': source, 'code': True, 'ok': True, 'via': 'shell'})
         if ev['k'] != 'run':
+            return
+        expect = ev['kind'] != 'other' and expects_fail(ev['cmd'])
+        last_decides = expect or (ev['kind'] == 'test' and _reruns_a_test(ev['cmd']))
+        if err:
+            ev['state'], ev['why'] = _failed(text)
+            # `pytest; git push` exits with git's code. It's the test's failure only if the test is the
+            # last step or its own summary says so; otherwise it's just a failed command.
+            if ev['kind'] != 'other':
+                found = _summary(ev['kind'], text, last_decides)
+                if expect:
+                    ev['expected'] = True              # meant to go red (the old code, a mutation test): still a red run
+                elif found and found[0] == 'fail':
+                    ev['why'] = '%s; printed %s' % (ev['why'], _short(found[1], 50))
+                elif found or not _ends_with_check(ev['cmd']):
+                    ev['kind'] = 'other'               # the tests passed; another step failed
+                ev['out'] = text[-20000:]
             return
         m = BACKGROUND.search(text[:400])
         task = extra.get('backgroundTaskId') or (m.group(1) if m and m.group(1) else None)
@@ -541,9 +652,9 @@ class Evidence:
             if task:
                 self.tasks[str(task)] = ev
             return
-        ev['state'], ev['why'] = read_output(ev['kind'], text)
-        if ev['state'] != 'pass' and ev['kind'] != 'other' and EXPECT_FAIL.search(ev['cmd']):
-            ev['expected'] = True
+        ev['state'], ev['why'] = read_output(ev['kind'], text, last_decides)
+        if last_decides:
+            _mark_expected(ev, text, expect)
         if ev['kind'] != 'other':
             ev['out'] = text[-20000:]
 
@@ -556,11 +667,17 @@ class Evidence:
         if status in ('killed', 'stopped'):
             ev['state'], ev['why'] = 'not_run', 'was stopped before it finished'
         elif status == 'completed' and (code in (None, '0') or 'No matches found' in summary):
-            ev['state'], ev['why'] = read_output(ev['kind'], output or '')
+            expect = ev['kind'] != 'other' and expects_fail(ev['cmd'])
+            last_decides = expect or (ev['kind'] == 'test' and _reruns_a_test(ev['cmd']))
+            ev['state'], ev['why'] = read_output(ev['kind'], output or '', last_decides)
+            if last_decides:
+                _mark_expected(ev, output or '', expect)
             if output and ev['kind'] != 'other':
                 ev['out'] = output[-20000:]
         else:
             ev['state'], ev['why'] = 'fail', ('exited with code %s' % code) if code not in (None, '0') else 'failed'
+            if ev['kind'] != 'other' and expects_fail(ev['cmd']):
+                ev['expected'] = True
 
     def _task_result(self, task, text, what, err):
         ev = self.tasks.get(task)
@@ -597,9 +714,14 @@ class Evidence:
 
 
 # A claim made while saying that something still fails or is still running isn't hiding the result.
-ACK_FAIL = re.compile(r'\b[1-9]\d*\s+(?:tests?\s+)?(?:fail(?:s|ed|ing|ures?)?|errors?)\b'
-                      r'|\b(?:pre-?existing|unrelated|still (?:fail|fails|failing|broken|red)|known (?:failure|issue)|flaky|not related)\b'
-                      r'|[1-9]\d*\s*(?:条|项|个)\s*(?:测试)?\s*(?:失败|报错)|原有|本来就|无关|(?:仍|还)(?:有|在|是)?.{0,12}(?:失败|报错|没过)', re.I)
+# "Pre-existing" or 无关 alone isn't enough ("kept the existing API"); it has to be about a failure or a test.
+ACK_FAIL = re.compile(r'\b[1-9]\d*\s+(?:tests?\s+)?fail(?:s|ed|ing|ures?)?\b|\b[1-9]\d*\s+tests?\s+errors?\b'
+                      r'|\bstill\s+(?:fail|fails|failing|broken|red)\b|\bknown\s+(?:failure|issue)\b'
+                      r'|\b(?:fail\w*|tests?|errors?)\b\W+(?:\w+\W+){0,6}?(?:pre-?existing|unrelated|not\s+related|flaky)\b'
+                      r'|\b(?:pre-?existing|unrelated|flaky)\W+(?:\w+\W+){0,3}?(?:fail\w*|tests?|errors?)\b'
+                      r'|[1-9]\d*\s*(?:条|项|个)\s*(?:测试)?\s*(?:失败|报错)'
+                      r'|(?:原有|本来就|之前就|已知|无关)[^。！？\n]{0,15}(?:失败|报错|没过)|(?:失败|报错|没过)[^。！？\n]{0,15}(?:原有|本来就|之前就|已知|无关)'
+                      r'|(?:仍|还)(?:有|在|是)?.{0,12}(?:失败|报错|没过)', re.I)
 NOT_PROOF = ('fail', 'timeout', 'not_run', 'pending', 'empty')
 
 
@@ -648,15 +770,19 @@ def _judge_done(ev, actions, claim, raw):
     # 'open' means no result was written yet. The transcript lags, so that isn't held against the claim.
     passed = [e for e in after if e['state'] in ('pass', 'open')]
     edited_now = le >= 0 and ev.events[le]['turn'] == ev.turn
-    if edited_now and not passed:
-        return 'done', claim, 'nothing ran successfully after the last edit' + _detail(after)
     # Tests and builds: the latest finished one decides. A passing `ls -la` doesn't outweigh a failing `pytest`.
-    # A run the command itself says should fail (a mutation test) doesn't decide.
+    # A run the command itself says should fail (the old code, a mutation test) doesn't decide.
     checks = [e for e in after if e['kind'] != 'other' and not e.get('expected')
               and e['state'] in ('pass', 'fail', 'timeout', 'empty')]
-    if checks and checks[-1]['state'] != 'pass' and not ACK_FAIL.search(raw):
+    if checks and checks[-1]['state'] == 'fail' and ACK_FAIL.search(raw):
+        return None                    # it says what still fails: that's the result, not a hidden one
+    # Code changed and nothing since has run: whatever the reply cites, the transcript shows no check of this code.
+    if le >= 0 and not passed:
+        return 'done', claim, ('nothing ran successfully after the last edit' + ('' if edited_now else ', made in an earlier turn')
+                               + _detail(after))
+    if checks and checks[-1]['state'] != 'pass':
         return 'done', claim, 'the last test or build after the edit did not pass: ' + _describe(checks[-1])
-    # A wrap-up with no edits can lean on a check from an earlier turn, as long as no code changed since.
+    # No code edits in the session: a wrap-up can lean on a check from an earlier turn, or cite proof.
     # Proof is looked for in the raw text: a hash in backticks or before a question still counts.
     if not passed and not edited_now and not has_proof(raw) and not any(n == 'EditDoc' for _, n, _ in actions):
         return 'done', claim, ('nothing ran in this turn and you cited no proof' if not actions else
@@ -777,7 +903,7 @@ def _not_loaded(run, changed):
         p = os.path.normpath(f if os.path.isabs(f) else os.path.join(base, f))
         rel = os.path.normpath(f).lstrip('./' if not os.path.isabs(f) else '')
         if os.path.isdir(p):
-            dirs.append((p, rel))
+            return None                           # a folder: the whole suite under it, can't tell what it loads
         elif os.path.isfile(p):
             t = _read_tail(p, 524288)
             if t is None:
@@ -791,7 +917,13 @@ def _not_loaded(run, changed):
             return None
         if any(c.startswith(p + os.sep) or (os.sep + rel + os.sep) in c for p, rel in dirs):
             return None
-        if any(re.search(r'(?<![\w])' + re.escape(_module(c)) + r'(?![\w])', t) for _, _, t in texts):
+        # The module's name, or its package's (`from src import charge` may load src/billing.py). Only a real
+        # package counts: a folder like scripts/ or utils/ is mentioned everywhere and says nothing.
+        pkg = os.path.dirname(c)
+        names = {_module(c)}
+        if any(os.path.isfile(os.path.join(pkg, n)) for n in ('__init__.py', 'index.js', 'index.ts', 'index.mjs', 'mod.rs', 'lib.rs')):
+            names.add(os.path.basename(pkg))
+        if any(re.search(r'(?<![\w])' + re.escape(n) + r'(?![\w])', t) for n in names for _, _, t in texts):
             return None
     shown = ', '.join(rel for _, rel, _ in texts) or ', '.join(rel for _, rel in dirs)
     return ('not-loaded', 'the tests that passed (%s) never mention %s, so they may not load your change'
@@ -839,10 +971,19 @@ def _elsewhere(run, changed):
 
 
 def red_then_green(ev, le):
-    """A test failed before the edit at index le, and the same test passed after it."""
-    tests = [e for e in ev.events[le + 1:] if e['k'] == 'run' and e['kind'] == 'test' and e['state'] == 'pass']
-    reds = [e for e in ev.events[:max(le, 0)] if e['k'] == 'run' and e['kind'] == 'test' and e['state'] == 'fail']
-    return any(_same_check(r['cmd'], g['cmd']) for r in reds for g in tests)
+    """The same test was red before the fix and green after the edit at index le. Red means its last run
+    before the edit failed (an old failure that later went green belongs to an earlier task), or a run
+    after the edit showed it failing on the old code (`git stash && pytest …`)."""
+    tests = [(k, e) for k, e in enumerate(ev.events) if e['k'] == 'run' and e['kind'] == 'test']
+    greens = [e for k, e in tests if k > le and e['state'] == 'pass']
+    if any(g.get('red_inside') for g in greens):
+        return True
+    on_old_code = [e for k, e in tests if k > le and e.get('expected') and e['state'] == 'fail']
+    for g in greens:
+        before = [e for k, e in tests if k < le and e['state'] in ('pass', 'fail') and _same_check(e['cmd'], g['cmd'])]
+        if (before and before[-1]['state'] == 'fail') or any(_same_check(r['cmd'], g['cmd']) for r in on_old_code):
+            return True
+    return False
 
 
 def notes(ev, claim):
@@ -1399,8 +1540,10 @@ def session(path, final_text=None, wait=1.0):
     before it may be missing too, so wait up to `wait` seconds for it to catch up.
     """
     deadline = time.monotonic() + wait
+    entries, pos = [], 0
     while True:
-        entries = load(path)
+        more, pos = read_from(path, pos)     # only what was appended since the last look
+        entries += [e for e in more if not e.get('isSidechain')]    # a subagent's own steps, as in replay
         if not final_text or _written(entries, final_text) or time.monotonic() >= deadline:
             break
         time.sleep(0.1)
@@ -1422,7 +1565,9 @@ def check(path):
     return 1 if v else 0
 
 
-REASONS = (        # how replay groups the turns it would have blocked, by the start of the reason
+REASONS = (        # how replay groups the turns it would have blocked, by the start of the reason (first match wins)
+    ('nothing ran successfully after the last edit, made in an earlier turn',
+     'a wrap-up: code edited in an earlier turn, nothing run successfully since'),
     ('nothing ran successfully after the last edit', 'nothing ran successfully after the last code edit'),
     ('the last test or build after the edit did not pass', 'the last test or build after the code edit did not pass'),
     ('nothing ran in this turn and you cited no proof',
