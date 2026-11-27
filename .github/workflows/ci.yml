@@ -11,17 +11,16 @@ permissions:
 jobs:
   tests:
     name: Tests (Python ${{ matrix.python }})
-    runs-on: ubuntu-latest
-    # ubuntu-latest (26.04) has no Python 3.9 for setup-python, so each version runs in its official image.
-    container: python:${{ matrix.python }}-slim
-    defaults:
-      run:
-        shell: bash
+    # Pinned: ubuntu-latest moved to 26.04, where setup-python has no Python 3.9.
+    runs-on: ubuntu-24.04
     strategy:
       matrix:
         python: ["3.9", "3.12"]
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
       - name: Unit tests (what each kind of claim must catch and let through)
         run: python -m unittest discover tests -v
       - name: The hook runs the way Claude Code calls it
