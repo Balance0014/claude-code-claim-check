@@ -2,7 +2,7 @@
 
 [![Sigistry](https://sigistry.com/badge/claim-check.svg)](https://sigistry.com/verification)
 
-Claude Code 会说「做完了」或「修好了」，其实这一改它并没有验证。claim-check 在你相信这句话之前，把没验证的说法拦下来。
+Claude Code 会说「做完了」或「修好了」，其实这一改它并没有验证。claim-check 是一个 Claude Code Stop 钩子，在你相信这句话之前，把没验证的说法拦下来。
 
 [English](README.md) · 0.5.1 · MIT · Python 3.9+，不用装任何依赖 · 作者 [Balance Zhao](https://x.com/balance0014)
 

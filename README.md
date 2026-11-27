@@ -2,7 +2,7 @@
 
 [![Sigistry](https://sigistry.com/badge/claim-check.svg)](https://sigistry.com/verification)
 
-Claude Code says "done" or "fixed" when it didn't verify the change. claim-check catches that claim before you trust it.
+Claude Code says "done" or "fixed" when it didn't verify the change. claim-check is a Claude Code Stop hook that catches that claim before you trust it.
 
 [中文说明](README.zh-CN.md) · 0.5.1 · MIT · Python 3.9+, no dependencies · by [Balance Zhao](https://x.com/balance0014)
 
