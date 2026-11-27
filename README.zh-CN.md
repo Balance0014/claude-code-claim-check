@@ -4,21 +4,9 @@
 
 Claude Code 会说「做完了」或「修好了」，其实这一改它并没有验证。claim-check 在你相信这句话之前，把没验证的说法拦下来。
 
-[English](README.md) · 0.5.1 · MIT · Python 3.9+，不用装任何依赖
+[English](README.md) · 0.5.1 · MIT · Python 3.9+，不用装任何依赖 · 作者 [Balance Zhao](https://x.com/balance0014)
 
-它改了 `src/auth/redirect.ts`。改完之后什么都没跑，还是说：
-
-```text
-The redirect loop is fixed.
-```
-
-钩子把这一轮打回去一次：
-
-```text
-claim-check: you wrote "is fixed", but nothing ran successfully after the last edit.
-Run the check that proves it (the tests, the script, a request to the live URL) and
-show the result, or say plainly that it isn't verified yet.
-```
+![claim-check 在 Claude Code 里拦下一句没有证据的「修好了」，AI 跑完测试后带着结果重新回答](docs/demo.svg)
 
 如果它帮你躲开过一次不该合的改动，一个 star 能让别人也找到它。
 
@@ -47,8 +35,6 @@ show the result, or say plainly that it isn't verified yet.
 - **计划中。** 测试或构建命令的退出码。现在只要命令不在只查看的名单上、而且没失败，就算数，钩子也不读退出码。回复里写着「exit code 0」，只在这一轮没改代码时算作引用的证据。
 - **计划中。** 回归测试：改之前失败，改之后通过。
 - **计划中。** 测试真的加载了被改的那个文件。钩子只能看见改完之后跑过一条命令，看不出这条命令有没有加载那个文件。
-
-![claim-check 在 Claude Code 里拦下一句没有证据的「修好了」，AI 跑完测试后带着结果重新回答](docs/demo.svg)
 
 ## 它怎么工作
 

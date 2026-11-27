@@ -4,21 +4,9 @@
 
 Claude Code says "done" or "fixed" when it didn't verify the change. claim-check catches that claim before you trust it.
 
-[中文说明](README.zh-CN.md) · 0.5.1 · MIT · Python 3.9+, no dependencies
+[中文说明](README.zh-CN.md) · 0.5.1 · MIT · Python 3.9+, no dependencies · by [Balance Zhao](https://x.com/balance0014)
 
-The agent edits `src/auth/redirect.ts`. Nothing runs after that edit, and it still says:
-
-```text
-The redirect loop is fixed.
-```
-
-claim-check sends the turn back once:
-
-```text
-claim-check: you wrote "is fixed", but nothing ran successfully after the last edit.
-Run the check that proves it (the tests, the script, a request to the live URL) and
-show the result, or say plainly that it isn't verified yet.
-```
+![claim-check blocks an unproven "is fixed" in Claude Code; the agent then runs the tests and answers with the result](docs/demo.svg)
 
 If this saved you a bad merge, a star helps others find it.
 
@@ -47,8 +35,6 @@ How those 86 split, the rest of that hand check, and 17 "not found" turns are in
 - **Planned.** Exit codes of test and build commands. Today any command that isn't on the look-only list counts, as long as it didn't fail, and the hook doesn't read the exit code. The words "exit code 0" in the reply count as cited proof only when that turn edited no code.
 - **Planned.** Regression tests that fail before the change and pass after.
 - **Planned.** Tests that load the changed file. The hook can see that a command ran after the edit. It can't see whether that command loaded the file.
-
-![claim-check blocks an unproven "is fixed" in Claude Code; the agent then runs the tests and answers with the result](docs/demo.svg)
 
 ## How it works
 
