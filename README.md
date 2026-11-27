@@ -1,4 +1,4 @@
-# claim-check
+# claim-check: a Claude Code Stop hook that checks "done" claims
 
 [![Sigistry](https://sigistry.com/badge/claim-check.svg)](https://sigistry.com/verification)
 
@@ -157,6 +157,18 @@ If it blocks something it shouldn't, [open an issue](https://github.com/Balance0
 
 ## FAQ
 
+**Why does Claude Code say "fixed" or "tests pass" when nothing ran?**  
+Nothing in Claude Code compares the agent's last message with what actually ran in the session, so a claim can go out with no test behind it. In my own history, 406 of 3,977 turns ended with a claim like that ([Measured on my own sessions](#measured-on-my-own-sessions)). claim-check adds the comparison: it reads the session transcript when the agent tries to stop.
+
+**What is a Claude Code Stop hook?**  
+A command Claude Code runs when the agent finishes responding. If the hook answers with `"decision": "block"` and a reason, Claude doesn't stop; it reads the reason and keeps working ([Claude Code hooks reference](https://code.claude.com/docs/en/hooks)). claim-check is a Stop hook example you can read in one file, `claim_check.py`.
+
+**Why a hook instead of a rule in CLAUDE.md or a skill?**  
+A rule in CLAUDE.md or a skill is text the agent reads and may not follow. A hook is code that Claude Code runs at the end of every turn, whether the agent remembers the rule or not.
+
+**Does it stop Claude Code from hallucinating?**  
+No. It catches two kinds of unproven claim: finished work with nothing run after the last edit, and "doesn't exist" after a single lookup. A claim backed by a test that checks the wrong thing still gets through; see [What it can't do](#what-it-cant-do).
+
 **Does this work with Claude Code?**  
 Yes. Install it as a Claude Code plugin, or add `claim_check.py` as a Stop hook in `~/.claude/settings.json`. It needs Python 3.9+ and has no dependencies.
 
@@ -180,6 +192,13 @@ I found a bug in that older version while rewriting it for the first release. It
 
 ---
 
-Made by [Balance Zhao](https://github.com/Balance0014). I post new tools on [X](https://x.com/balance0014).
+<!-- more-from:start -->
+## More from Balance Zhao
 
-**More from [Balance Zhao](https://github.com/Balance0014):** [Post-quantum blockchain map](https://github.com/Balance0014/post-quantum-blockchains) (open for submissions) · [when-to-clear](https://github.com/Balance0014/claude-code-when-to-clear) · [one-person-ai-company](https://github.com/Balance0014/one-person-ai-company) · [telegram-rug-checker](https://github.com/Balance0014/telegram-rug-checker) · [reddit-lead-finder](https://github.com/Balance0014/reddit-lead-finder)
+Open-source tools by [Balance Zhao](https://github.com/Balance0014), an AI and crypto creator who researches post-quantum blockchains. New tools are posted on [X @balance0014](https://x.com/balance0014).
+
+- **Crypto research:** [Post-quantum blockchain map](https://github.com/Balance0014/post-quantum-blockchains) · [Rug-pull and honeypot checker bot for Telegram](https://github.com/Balance0014/telegram-rug-checker) · [Bitcoin and economic cycle dashboard](https://github.com/Balance0014/cycle-board-public)
+- **Claude Code and AI agents:** **Claude Code Stop hook that checks "done" claims** (this repo) · [Claude Code token usage report and /clear reminder](https://github.com/Balance0014/claude-code-when-to-clear) · [One-person AI company playbook](https://github.com/Balance0014/one-person-ai-company)
+- **AI video and content:** [Explainer video skill for coding agents](https://github.com/Balance0014/source-to-explainer-video) · [AI pet video storyboard skill](https://github.com/Balance0014/ai-pet-short-video-director) · [Translate English videos to Chinese subtitles](https://github.com/Balance0014/video-translation-x-post) · [Trending GitHub projects to X posts](https://github.com/Balance0014/github-to-x-posts)
+- **Finding users:** [Reddit lead finder Chrome extension](https://github.com/Balance0014/reddit-lead-finder)
+<!-- more-from:end -->
